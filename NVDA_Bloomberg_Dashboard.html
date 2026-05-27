@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVDA US Equity — Bloomberg Terminal</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    color: #ff8c00;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 12px;
+    overflow-x: hidden;
+  }
+
+  /* TOP BAR */
+  .top-bar {
+    background: #1a1a1a;
+    border-bottom: 1px solid #ff8c00;
+    padding: 3px 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+  }
+  .top-bar .logo { color: #ff8c00; font-weight: bold; font-size: 13px; }
+  .top-bar .time { color: #ffcc00; }
+  .top-bar .nav { color: #aaa; }
+
+  /* HEADER TICKER PANEL */
+  .ticker-header {
+    background: #0a0a0a;
+    border-bottom: 2px solid #ff8c00;
+    padding: 6px 10px;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 20px;
+    align-items: center;
+  }
+  .ticker-name { font-size: 22px; font-weight: bold; color: #ff8c00; }
+  .ticker-sub { font-size: 11px; color: #888; margin-top: 2px; }
+  .price-block { text-align: center; }
+  .price-main { font-size: 28px; font-weight: bold; color: #00ff41; }
+  .price-change-up { color: #00ff41; font-size: 14px; }
+  .price-change-down { color: #ff3333; font-size: 14px; }
+  .price-label { color: #888; font-size: 10px; }
+  .ticker-meta { font-size: 11px; color: #aaa; text-align: right; line-height: 1.7; }
+  .ticker-meta span { color: #ff8c00; }
+
+  /* MAIN GRID */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    grid-template-rows: auto auto auto;
+    gap: 1px;
+    background: #333;
+    border: 1px solid #333;
+  }
+
+  /* PANELS */
+  .panel {
+    background: #000;
+    padding: 6px 8px;
+  }
+  .panel-title {
+    background: #1a1a1a;
+    color: #ffcc00;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-weight: bold;
+    border-bottom: 1px solid #ff8c00;
+    margin: -6px -8px 6px -8px;
+    letter-spacing: 1px;
+  }
+  .panel-title .cmd { color: #ff8c00; margin-right: 6px; }
+
+  /* TABLE */
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th {
+    color: #888;
+    text-align: left;
+    padding: 1px 4px;
+    border-bottom: 1px solid #222;
+    font-weight: normal;
+    font-size: 10px;
+  }
+  td { padding: 2px 4px; border-bottom: 1px solid #111; }
+  td.lbl { color: #aaa; }
+  td.val { color: #ff8c00; text-align: right; }
+  td.up { color: #00ff41; text-align: right; }
+  td.dn { color: #ff3333; text-align: right; }
+  td.neu { color: #ffcc00; text-align: right; }
+  td.hi { color: #fff; font-weight: bold; text-align: right; }
+
+  /* ROW HIGHLIGHT */
+  tr.base-row td { background: #0d1a0d; }
+  tr.bull-row td { background: #001a00; }
+  tr.bear-row td { background: #1a0000; }
+  tr.nvda-row td { background: #1a1200; font-weight: bold; }
+
+  /* RECOMMENDATION BOX */
+  .rec-box {
+    border: 1px solid;
+    padding: 4px 8px;
+    margin: 4px 0;
+    font-size: 11px;
+  }
+  .rec-wait { border-color: #ffcc00; color: #ffcc00; }
+  .rec-buy  { border-color: #00ff41; color: #00ff41; }
+  .rec-hold { border-color: #aaa;    color: #aaa; }
+
+  .horizon-title { color: #888; font-size: 10px; margin-bottom: 1px; }
+  .horizon-rec   { font-size: 13px; font-weight: bold; }
+
+  /* GAUGE / BARS */
+  .bar-row { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 10px; }
+  .bar-label { color: #aaa; width: 80px; flex-shrink: 0; }
+  .bar-outer { flex: 1; background: #111; height: 8px; border: 1px solid #333; }
+  .bar-inner { height: 100%; }
+  .bar-pct { width: 36px; text-align: right; color: #ff8c00; }
+
+  /* MOAT / RISK RATING DOTS */
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 2px; }
+  .dot-g { background: #00ff41; }
+  .dot-y { background: #ffcc00; }
+  .dot-r { background: #ff3333; }
+  .dot-e { background: #222; border: 1px solid #444; }
+
+  /* FOOTBALL FIELD */
+  .ff-container { position: relative; height: 14px; background: #111; border: 1px solid #333; margin: 3px 0; }
+  .ff-range { position: absolute; height: 100%; opacity: 0.6; }
+  .ff-price { position: absolute; width: 2px; height: 100%; background: #fff; }
+  .ff-label { font-size: 9px; color: #888; margin-top: 1px; }
+
+  /* SENSITIVITY GRID */
+  .sens-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px; margin-top: 4px; }
+  .sens-cell {
+    padding: 2px 3px;
+    text-align: center;
+    font-size: 9px;
+    border: 1px solid #111;
+  }
+  .sens-header { background: #1a1a1a; color: #888; font-size: 9px; }
+  .sens-base { background: #1a1200; color: #ffcc00; font-weight: bold; }
+  .sens-bull { background: #001500; color: #00ff41; }
+  .sens-bear { background: #150000; color: #ff4444; }
+  .sens-mid  { background: #0a0a00; color: #ff8c00; }
+
+  /* TICKER TAPE */
+  .tape {
+    background: #0a0a0a;
+    border-top: 1px solid #333;
+    border-bottom: 1px solid #333;
+    overflow: hidden;
+    white-space: nowrap;
+    padding: 3px 0;
+  }
+  .tape-inner { display: inline-block; animation: scroll 30s linear infinite; }
+  @keyframes scroll { from { transform: translateX(100vw); } to { transform: translateX(-100%); } }
+  .tape-item { display: inline-block; margin-right: 30px; font-size: 11px; }
+  .tape-item .t-sym { color: #ff8c00; font-weight: bold; }
+  .tape-item .t-price { color: #fff; }
+  .tape-item .t-chg { }
+
+  /* FULL WIDTH PANEL */
+  .panel-full { grid-column: 1 / -1; }
+  .panel-2col { grid-column: span 2; }
+
+  /* CATALYST TIMELINE */
+  .timeline { position: relative; padding-left: 16px; }
+  .timeline::before { content: ''; position: absolute; left: 5px; top: 0; bottom: 0; width: 1px; background: #333; }
+  .tl-item { position: relative; margin-bottom: 6px; }
+  .tl-item::before { content: '■'; position: absolute; left: -14px; color: #ff8c00; font-size: 8px; top: 1px; }
+  .tl-horizon { color: #ffcc00; font-size: 10px; font-weight: bold; }
+  .tl-text { color: #aaa; font-size: 10px; line-height: 1.5; }
+
+  /* BOTTOM STATUS */
+  .status-bar {
+    background: #1a1a1a;
+    border-top: 1px solid #ff8c00;
+    padding: 2px 8px;
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    color: #666;
+  }
+  .status-bar .ok { color: #00ff41; }
+
+  /* DISCLAIMER */
+  .disclaimer {
+    background: #0a0000;
+    border-top: 1px solid #660000;
+    padding: 4px 10px;
+    font-size: 9px;
+    color: #555;
+    text-align: center;
+  }
+
+  /* WATERMARK */
+  .watermark {
+    position: fixed;
+    bottom: 30px;
+    right: 20px;
+    font-size: 48px;
+    color: rgba(255,140,0,0.04);
+    font-weight: bold;
+    pointer-events: none;
+    user-select: none;
+  }
+
+  /* BLINK */
+  .blink { animation: blink 1.2s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .section-divider { border: none; border-top: 1px solid #1a1a1a; margin: 4px 0; }
+
+  .label-row { display: flex; justify-content: space-between; font-size: 10px; margin: 2px 0; }
+  .label-row .lk { color: #888; }
+  .label-row .vk { color: #ff8c00; }
+  .label-row .vk-up { color: #00ff41; }
+  .label-row .vk-dn { color: #ff3333; }
+  .label-row .vk-ne { color: #ffcc00; }
+</style>
+</head>
+<body>
+
+<div class="watermark">BLOOMBERG</div>
+
+<!-- TOP BAR -->
+<div class="top-bar">
+  <div class="logo">BLOOMBERG TERMINAL</div>
+  <div class="nav">NVDA US &lt;EQUITY&gt; DES | GP | FA | COMP | RV | DCF</div>
+  <div class="time" id="clock">2026-05-27 &nbsp;■ LIVE</div>
+</div>
+
+<!-- TICKER TAPE -->
+<div class="tape">
+  <div class="tape-inner">
+    <span class="tape-item"><span class="t-sym">NVDA</span> <span class="t-price">135.58</span> <span class="t-chg up">▲2.34 (+1.76%)</span></span>
+    <span class="tape-item"><span class="t-sym">AMD</span> <span class="t-price">115.84</span> <span class="t-chg dn">▼0.92 (-0.79%)</span></span>
+    <span class="tape-item"><span class="t-sym">AVGO</span> <span class="t-price">228.40</span> <span class="t-chg up">▲1.15 (+0.51%)</span></span>
+    <span class="tape-item"><span class="t-sym">TSM</span> <span class="t-price">193.80</span> <span class="t-chg up">▲0.60 (+0.31%)</span></span>
+    <span class="tape-item"><span class="t-sym">QCOM</span> <span class="t-price">148.60</span> <span class="t-chg dn">▼1.20 (-0.80%)</span></span>
+    <span class="tape-item"><span class="t-sym">INTC</span> <span class="t-price">21.10</span> <span class="t-chg dn">▼0.30 (-1.40%)</span></span>
+    <span class="tape-item"><span class="t-sym">MRVL</span> <span class="t-price">72.30</span> <span class="t-chg up">▲0.45 (+0.63%)</span></span>
+    <span class="tape-item"><span class="t-sym">SPX</span> <span class="t-price">5,892.40</span> <span class="t-chg up">▲18.2 (+0.31%)</span></span>
+    <span class="tape-item"><span class="t-sym">NDX</span> <span class="t-price">21,340.10</span> <span class="t-chg up">▲72.4 (+0.34%)</span></span>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <span class="tape-item"><span class="t-sym">NVDA</span> <span class="t-price">135.58</span> <span class="t-chg up">▲2.34 (+1.76%)</span></span>
+    <span class="tape-item"><span class="t-sym">AMD</span> <span class="t-price">115.84</span> <span class="t-chg dn">▼0.92 (-0.79%)</span></span>
+    <span class="tape-item"><span class="t-sym">AVGO</span> <span class="t-price">228.40</span> <span class="t-chg up">▲1.15 (+0.51%)</span></span>
+    <span class="tape-item"><span class="t-sym">TSM</span> <span class="t-price">193.80</span> <span class="t-chg up">▲0.60 (+0.31%)</span></span>
+    <span class="tape-item"><span class="t-sym">QCOM</span> <span class="t-price">148.60</span> <span class="t-chg dn">▼1.20 (-0.80%)</span></span>
+  </div>
+</div>
+
+<!-- HEADER -->
+<div class="ticker-header">
+  <div>
+    <div class="ticker-name">NVDA US <span style="color:#888;font-size:14px;">Equity</span></div>
+    <div class="ticker-sub">NVIDIA CORPORATION | NASDAQ GS | USD | Semi-conducteurs IA</div>
+  </div>
+  <div class="price-block">
+    <div class="price-label">DERNIER</div>
+    <div class="price-main">135.58</div>
+    <div class="price-change-up">▲ 2.34 &nbsp;(+1.76%) &nbsp;<span style="color:#888">27/05/2026 16:00 ET</span></div>
+  </div>
+  <div class="ticker-meta">
+    Cap. Boursière: <span>$3 317Md</span><br>
+    Vol. Jour: <span>312.4M</span><br>
+    52S Haut/Bas: <span>$153.13 / $86.22</span><br>
+    Flottant: <span>24.42Md actions</span><br>
+    Secteur: <span>Semi-conducteurs / IA</span>
+  </div>
+</div>
+
+<!-- MAIN GRID -->
+<div class="main-grid">
+
+  <!-- PANEL 1: PRICE & FUNDAMENTALS -->
+  <div class="panel">
+    <div class="panel-title"><span class="cmd">GP</span> DONNÉES DE MARCHÉ</div>
+    <div class="label-row"><span class="lk">Ouverture</span><span class="vk">133.24</span></div>
+    <div class="label-row"><span class="lk">Clôture préc.</span><span class="vk">133.24</span></div>
+    <div class="label-row"><span class="lk">Haut du jour</span><span class="vk">136.42</span></div>
+    <div class="label-row"><span class="lk">Bas du jour</span><span class="vk">132.80</span></div>
+    <div class="label-row"><span class="lk">Volume</span><span class="vk">312.4M</span></div>
+    <div class="label-row"><span class="lk">Vol. moyen 30j</span><span class="vk">287.1M</span></div>
+    <hr class="section-divider">
+    <div class="label-row"><span class="lk">EV</span><span class="vk">$3 274Md</span></div>
+    <div class="label-row"><span class="lk">Tréso. nette</span><span class="vk-up">$36 978M</span></div>
+    <div class="label-row"><span class="lk">Beta 5Y</span><span class="vk">1.72x</span></div>
+    <div class="label-row"><span class="lk">Dividende</span><span class="vk">$0.04/tr.</span></div>
+    <div class="label-row"><span class="lk">Rend. div.</span><span class="vk">0.12%</span></div>
+    <hr class="section-divider">
+    <div class="label-row"><span class="lk">P/E LTM</span><span class="vk">45.5x</span></div>
+    <div class="label-row"><span class="lk">P/E NTM</span><span class="vk-up">28.2x ◀ DÉCOTE</span></div>
+    <div class="label-row"><span class="lk">EV/EBITDA NTM</span><span class="vk">25.5x</span></div>
+    <div class="label-row"><span class="lk">EV/Rev NTM</span><span class="vk">16.7x</span></div>
+    <div class="label-row"><span class="lk">P/Sales NTM</span><span class="vk">16.7x</span></div>
+  </div>
+
+  <!-- PANEL 2: DCF VALUATION -->
+  <div class="panel">
+    <div class="panel-title"><span class="cmd">DCF</span> VALORISATION INTRINSÈQUE</div>
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+      <div style="text-align:center;">
+        <div style="font-size:9px;color:#888;">VALEUR DCF BASE</div>
+        <div style="font-size:22px;color:#ffcc00;font-weight:bold;">$144.61</div>
+        <div style="font-size:10px;color:#00ff41;">+6.7% upside</div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-size:9px;color:#888;">COURS ACTUEL</div>
+        <div style="font-size:22px;color:#ff8c00;font-weight:bold;">$135.58</div>
+        <div style="font-size:10px;color:#888;">27/05/2026</div>
+      </div>
+    </div>
+    <table>
+      <tr><th>Scénario</th><th>WACC</th><th>TGR</th><th>Prix</th><th>Δ</th></tr>
+      <tr class="bull-row">
+        <td class="lbl">🟢 Haussier</td>
+        <td class="val">9.0%</td>
+        <td class="val">4.0%</td>
+        <td class="up">$231.57</td>
+        <td class="up">+70.8%</td>
+      </tr>
+      <tr class="base-row">
+        <td class="lbl">🟡 Base ★</td>
+        <td class="val">10.0%</td>
+        <td class="val">3.5%</td>
+        <td class="neu">$144.61</td>
+        <td class="neu">+6.7%</td>
+      </tr>
+      <tr class="bear-row">
+        <td class="lbl">🔴 Baissier</td>
+        <td class="val">11.5%</td>
+        <td class="val">2.5%</td>
+        <td class="dn">$83.51</td>
+        <td class="dn">-38.4%</td>
+      </tr>
+    </table>
+    <hr class="section-divider">
+    <div style="font-size:9px;color:#888;margin-top:4px;margin-bottom:2px;">HYPOTHÈSES DCF BASE</div>
+    <div class="label-row"><span class="lk">Coût des fonds propres</span><span class="vk">13.76%</span></div>
+    <div class="label-row"><span class="lk">WACC</span><span class="vk">10.00%</span></div>
+    <div class="label-row"><span class="lk">Croiss. terminale</span><span class="vk">3.50%</span></div>
+    <div class="label-row"><span class="lk">TV / EV total</span><span class="vk">59.8%</span></div>
+    <div class="label-row"><span class="lk">CAGR Rev. 3Y (FY25-28)</span><span class="vk-up">+43.7%</span></div>
+    <div class="label-row"><span class="lk">CAGR Rev. 5Y (FY25-30)</span><span class="vk-up">+32.9%</span></div>
+    <div class="label-row"><span class="lk">Marge EBIT (base)</span><span class="vk">60%→55%</span></div>
+    <div class="label-row"><span class="lk">Rev. FY2026E</span><span class="vk-up">$219Md (+68%)</span></div>
+  </div>
+
+  <!-- PANEL 3: RECOMMENDATION -->
+  <div class="panel">
+    <div class="panel-title"><span class="cmd">REC</span> RECOMMANDATION PAR HORIZON</div>
+
+    <div class="rec-box rec-wait" style="margin-top:4px;">
+      <div class="horizon-title">⏱ IMMÉDIAT / 1 MOIS</div>
+      <div class="horizon-rec">⚠️ ATTENDRE</div>
+      <div style="font-size:9px;margin-top:2px;">
+        Résultats Q1 FY2027 catalyseur #1.<br>
+        Risque/rendement neutre à court terme.<br>
+        Guidance décevante → -15/25% possible.
+      </div>
+    </div>
+
+    <div class="rec-box" style="border-color:#ffaa00;color:#ffaa00;margin-top:4px;">
+      <div class="horizon-title">📅 6 MOIS</div>
+      <div class="horizon-rec">🟡 ACCUMULER PRUDEMMENT</div>
+      <div style="font-size:9px;margin-top:2px;">
+        Cible comps NTM P/E: <strong>$162 (+19%)</strong><br>
+        Ramp Blackwell + preview Rubin = catalyseurs.<br>
+        Deals souverains Moyen-Orient / Inde.
+      </div>
+    </div>
+
+    <div class="rec-box rec-buy" style="margin-top:4px;">
+      <div class="horizon-title">📈 1 AN</div>
+      <div class="horizon-rec">🟢 POSITIF (conditionnel)</div>
+      <div style="font-size:9px;margin-top:2px;">
+        Bull case DCF: <strong>$231.57 (+70.8%)</strong><br>
+        Conditionnel: capex hyperscaler élevé en 2027.<br>
+        Risque export Chine: -$15/25 par action.
+      </div>
+    </div>
+
+    <hr class="section-divider">
+    <div style="font-size:9px;color:#888;margin-top:4px;">CONSENSUS ANALYSTES</div>
+    <div class="bar-row">
+      <span class="bar-label">Achat (~78%)</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:78%;background:#00ff41;"></div></div>
+      <span class="bar-pct" style="color:#00ff41;">78%</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">Neutre (~17%)</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:17%;background:#ffcc00;"></div></div>
+      <span class="bar-pct" style="color:#ffcc00;">17%</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">Vente (~5%)</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:5%;background:#ff3333;"></div></div>
+      <span class="bar-pct" style="color:#ff3333;">5%</span>
+    </div>
+  </div>
+
+  <!-- PANEL 4: COMPS TABLE -->
+  <div class="panel panel-2col">
+    <div class="panel-title"><span class="cmd">COMP</span> ANALYSE DES COMPARABLES — MULTIPLES DE TRADING</div>
+    <table>
+      <tr>
+        <th>Société</th><th>Ticker</th>
+        <th>P/E LTM</th><th>P/E NTM</th>
+        <th>EV/EBITDA LTM</th><th>EV/EBITDA NTM</th>
+        <th>EV/Rev LTM</th><th>EV/Rev NTM</th>
+        <th>Croiss. Rev.</th><th>Mg EBITDA</th>
+      </tr>
+      <tr class="nvda-row">
+        <td class="lbl">NVIDIA ★</td><td class="val">NVDA</td>
+        <td class="neu">45.5x</td><td class="up">28.2x ◀</td>
+        <td class="val">39.1x</td><td class="val">25.5x</td>
+        <td class="val">25.4x</td><td class="val">16.7x</td>
+        <td class="up">+51.9%</td><td class="up">65.0%</td>
+      </tr>
+      <tr>
+        <td class="lbl">AMD</td><td class="val">AMD</td>
+        <td class="val">114.1x†</td><td class="val">48.6x</td>
+        <td class="val">30.7x</td><td class="val">21.6x</td>
+        <td class="val">7.0x</td><td class="val">5.5x</td>
+        <td class="val">+7.4%</td><td class="val">22.9%</td>
+      </tr>
+      <tr>
+        <td class="lbl">Intel</td><td class="val">INTC</td>
+        <td class="dn">NM</td><td class="dn">NM†</td>
+        <td class="val">16.6x</td><td class="val">14.3x</td>
+        <td class="val">2.4x</td><td class="val">2.4x</td>
+        <td class="dn">-2.7%</td><td class="dn">14.4%</td>
+      </tr>
+      <tr>
+        <td class="lbl">Broadcom</td><td class="val">AVGO</td>
+        <td class="val">71.6x</td><td class="val">42.9x</td>
+        <td class="val">32.8x</td><td class="val">26.7x</td>
+        <td class="val">19.3x</td><td class="val">16.5x</td>
+        <td class="up">+44.1%</td><td class="up">58.8%</td>
+      </tr>
+      <tr>
+        <td class="lbl">TSMC</td><td class="val">TSM</td>
+        <td class="val">26.2x</td><td class="val">19.6x</td>
+        <td class="val">17.0x</td><td class="val">14.3x</td>
+        <td class="val">10.8x</td><td class="val">9.1x</td>
+        <td class="up">+38.8%</td><td class="up">63.7%</td>
+      </tr>
+      <tr>
+        <td class="lbl">Qualcomm</td><td class="val">QCOM</td>
+        <td class="val">24.9x</td><td class="val">23.5x</td>
+        <td class="val">18.5x</td><td class="val">16.8x</td>
+        <td class="val">5.9x</td><td class="val">5.6x</td>
+        <td class="val">+12.7%</td><td class="val">32.2%</td>
+      </tr>
+      <tr>
+        <td class="lbl">Marvell</td><td class="val">MRVL</td>
+        <td class="val">253.7x†</td><td class="val">69.4x†</td>
+        <td class="val">37.5x</td><td class="val">22.3x</td>
+        <td class="val">9.5x</td><td class="val">6.7x</td>
+        <td class="up">+42.9%</td><td class="val">25.2%</td>
+      </tr>
+      <tr style="background:#0d0d0d;border-top:1px solid #333;">
+        <td class="lbl" colspan="2" style="color:#888;">Médiane peers (excl. †)</td>
+        <td class="neu">26.2x</td><td class="neu">33.2x</td>
+        <td class="neu">32.8x</td><td class="neu">19.2x</td>
+        <td class="neu">9.5x</td><td class="neu">7.3x</td>
+        <td class="neu">+25.7%</td><td class="neu">45.8%</td>
+      </tr>
+      <tr style="background:#1a1200;">
+        <td class="lbl" colspan="2" style="color:#ffcc00;">NVDA vs médiane</td>
+        <td class="up">+73.7%</td><td class="up" style="color:#00ff41;font-weight:bold;">-15.1% ◀</td>
+        <td class="dn">+19.2%</td><td class="dn">+32.8%</td>
+        <td class="dn">+168%</td><td class="dn">+129%</td>
+        <td class="up">+26pp</td><td class="up">+19pp</td>
+      </tr>
+    </table>
+    <div style="font-size:9px;color:#555;margin-top:3px;">† Exclu du calcul médiane (distorsion one-time / amortissements). ◀ Signal clé: NVDA à -15% de décote sur NTM P/E malgré +52% de croissance.</div>
+  </div>
+
+  <!-- PANEL 5: FOOTBALL FIELD -->
+  <div class="panel">
+    <div class="panel-title"><span class="cmd">RV</span> FOOTBALL FIELD — FOURCHETTES DE VALEUR</div>
+    <div style="font-size:9px;color:#888;margin-bottom:6px;">Cours actuel: $135.58 (ligne blanche ▏)</div>
+
+    <!-- DCF Base -->
+    <div style="font-size:9px;color:#ffcc00;margin-bottom:1px;">DCF Base (WACC 10%, TGR 3.5%)</div>
+    <div class="ff-container" style="background:#0d1a0d;">
+      <div class="ff-range" style="left:25%;width:42%;background:#ffcc00;"></div>
+      <div class="ff-price" style="left:40%;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:8px;color:#555;margin-bottom:4px;"><span>$119</span><span style="color:#ffcc00;font-weight:bold;">▲$144.61</span><span>$185</span></div>
+
+    <!-- DCF Bull -->
+    <div style="font-size:9px;color:#00ff41;margin-bottom:1px;">DCF Haussier (WACC 9%, TGR 4%)</div>
+    <div class="ff-container" style="background:#001500;">
+      <div class="ff-range" style="left:55%;width:40%;background:#00aa33;"></div>
+      <div class="ff-price" style="left:40%;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:8px;color:#555;margin-bottom:4px;"><span>$196</span><span style="color:#00ff41;font-weight:bold;">▲$231.57</span><span>$285</span></div>
+
+    <!-- DCF Bear -->
+    <div style="font-size:9px;color:#ff4444;margin-bottom:1px;">DCF Baissier (WACC 11.5%, TGR 2.5%)</div>
+    <div class="ff-container" style="background:#150000;">
+      <div class="ff-range" style="left:5%;width:20%;background:#aa2200;"></div>
+      <div class="ff-price" style="left:40%;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:8px;color:#555;margin-bottom:4px;"><span>$75</span><span style="color:#ff4444;font-weight:bold;">▼$83.51</span><span>$93</span></div>
+
+    <!-- Comps NTM P/E -->
+    <div style="font-size:9px;color:#aaa;margin-bottom:1px;">Comps NTM P/E (médiane peers)</div>
+    <div class="ff-container">
+      <div class="ff-range" style="left:20%;width:35%;background:#555;"></div>
+      <div class="ff-price" style="left:40%;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:8px;color:#555;margin-bottom:4px;"><span>$95</span><span style="color:#fff;font-weight:bold;">$162</span><span>$237</span></div>
+
+    <!-- 52W Range -->
+    <div style="font-size:9px;color:#888;margin-bottom:1px;">Fourchette 52 semaines</div>
+    <div class="ff-container">
+      <div class="ff-range" style="left:5%;width:75%;background:#333;"></div>
+      <div class="ff-price" style="left:58%;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:8px;color:#555;margin-bottom:4px;"><span>$86.22</span><span style="color:#fff;">▏$135.58</span><span>$153.13</span></div>
+
+    <hr class="section-divider">
+    <div style="font-size:9px;color:#888;margin-top:4px;">VALORISATION IMPLICITE COMPS</div>
+    <table style="margin-top:4px;">
+      <tr><th>Méthode</th><th>Bas</th><th>Base</th><th>Haut</th></tr>
+      <tr><td class="lbl">NTM P/E</td><td class="val">$95</td><td class="up" style="font-weight:bold;">$162</td><td class="val">$237</td></tr>
+      <tr><td class="lbl">NTM EV/EBITDA</td><td class="val">$76</td><td class="neu">$102</td><td class="val">$142</td></tr>
+      <tr><td class="lbl">NTM EV/Revenue</td><td class="val">$45</td><td class="dn">$59</td><td class="val">$134</td></tr>
+    </table>
+  </div>
+
+  <!-- PANEL 6: RISK & MOAT + CATALYSTS -->
+  <div class="panel">
+    <div class="panel-title"><span class="cmd">FA</span> RISQUES & MOAT CONCURRENTIEL</div>
+
+    <div style="font-size:9px;color:#888;margin-bottom:3px;">SOLIDITÉ DU MOAT</div>
+    <div class="bar-row">
+      <span class="bar-label">CUDA Écosys.</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:95%;background:#00ff41;"></div></div>
+      <span class="bar-pct" style="color:#00ff41;">★★★★★</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">NVLink/Switch</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:90%;background:#00ff41;"></div></div>
+      <span class="bar-pct" style="color:#00ff41;">★★★★★</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">Systèmes DGX</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:80%;background:#00cc33;"></div></div>
+      <span class="bar-pct" style="color:#00cc33;">★★★★☆</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">Networking</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:75%;background:#ffcc00;"></div></div>
+      <span class="bar-pct" style="color:#ffcc00;">★★★★☆</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">Automotive</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:45%;background:#ffaa00;"></div></div>
+      <span class="bar-pct" style="color:#ffaa00;">★★☆☆☆</span>
+    </div>
+
+    <hr class="section-divider">
+    <div style="font-size:9px;color:#888;margin-bottom:3px;">MATRICE DES RISQUES</div>
+    <table>
+      <tr><th>Risque</th><th>Impact</th><th>Proba.</th></tr>
+      <tr>
+        <td class="lbl">Export Chine (H20)</td>
+        <td class="dn">ÉLEVÉ</td>
+        <td class="dn">MATÉRIALISÉ</td>
+      </tr>
+      <tr>
+        <td class="lbl">Silicon custom (GOOG/AMZN)</td>
+        <td class="val">MODÉRÉ</td>
+        <td class="neu">MOYEN TERME</td>
+      </tr>
+      <tr>
+        <td class="lbl">Concurrence AMD</td>
+        <td class="val">MODÉRÉ</td>
+        <td class="neu">EXISTANT</td>
+      </tr>
+      <tr>
+        <td class="lbl">Valorisation (miss)</td>
+        <td class="dn">ÉLEVÉ</td>
+        <td class="neu">BINAIRE</td>
+      </tr>
+      <tr>
+        <td class="lbl">Marge brute &lt;70%</td>
+        <td class="dn">ÉLEVÉ</td>
+        <td class="val">FAIBLE</td>
+      </tr>
+      <tr>
+        <td class="lbl">Antitrust CUDA</td>
+        <td class="val">MODÉRÉ</td>
+        <td class="val">ÉMERGENT</td>
+      </tr>
+    </table>
+  </div>
+
+  <!-- PANEL 7: CATALYSTS FULL WIDTH -->
+  <div class="panel panel-full">
+    <div class="panel-title"><span class="cmd">EV</span> CATALYSEURS PAR HORIZON TEMPOREL</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+      <div>
+        <div style="color:#ffcc00;font-size:11px;font-weight:bold;border-bottom:1px solid #333;padding-bottom:3px;margin-bottom:6px;">⏱ COURT TERME — 1 MOIS</div>
+        <div class="timeline">
+          <div class="tl-item">
+            <div class="tl-horizon">★ CATALYSEUR #1</div>
+            <div class="tl-text">Résultats Q1 FY2027 (fin mai 2026)<br>→ Revenue guidance Q2 + commentary marges Blackwell</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-horizon">Capex Hyperscalers</div>
+            <div class="tl-text">Guidance capex MSFT / GOOG / META / AMZN<br>→ Proxy direct commandes NVDA</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-horizon">Export Controls BIS</div>
+            <div class="tl-text">Signaux politique Commerce Dept.<br>→ Binaire, non prévisible</div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div style="color:#ffaa00;font-size:11px;font-weight:bold;border-bottom:1px solid #333;padding-bottom:3px;margin-bottom:6px;">📅 MOYEN TERME — 6 MOIS</div>
+        <div class="timeline">
+          <div class="tl-item">
+            <div class="tl-horizon">Ramp Blackwell pleine cadence</div>
+            <div class="tl-text">GB200 / NVL72 → confirmation livraisons<br>→ Supply normalisé = compression multiple ?</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-horizon">Preview Architecture Rubin</div>
+            <div class="tl-text">Successeur Blackwell, roadmap 12-18 mois<br>→ Étend narrative moat concurrentiel</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-horizon">Deals Souverains</div>
+            <div class="tl-text">UAE / Saudi / Inde / Japon<br>→ TAM additionnel non modélisé</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-horizon">AMD MI350X / MI400</div>
+            <div class="tl-text">Livraisons vs specs déclarées<br>→ Détermine narrative displacement</div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div style="color:#00ff41;font-size:11px;font-weight:bold;border-bottom:1px solid #333;padding-bottom:3px;margin-bottom:6px;">📈 LONG TERME — 1 AN</div>
+        <div class="timeline">
+          <div class="tl-item">
+            <div class="tl-horizon">★ Variable clé: Capex FY2027</div>
+            <div class="tl-text">Durabilité investissements hyperscalers<br>→ Variable la + importante pour le 12M</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-horizon">Taux displacement silicon custom</div>
+            <div class="tl-text">12 mois données empiriques TPU/Trainium/Maia<br>→ Prouve ou invalide thèse structurelle</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-horizon">Trajectoire marge brute</div>
+            <div class="tl-text">Stabilisation 72-76% → transition Rubin<br>→ Tout signal sous 70% = négatif fort</div>
+          </div>
+          <div class="tl-item">
+            <div class="tl-horizon">Chine: résolution politique</div>
+            <div class="tl-text">Probabilité faible, upside binaire<br>→ +$10Md+ revenus si déblocage</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PANEL 8: SENSITIVITY TABLE -->
+  <div class="panel panel-2col">
+    <div class="panel-title"><span class="cmd">SENS</span> TABLE DE SENSIBILITÉ — Prix implicite ($) | WACC vs Taux de croissance terminal</div>
+    <div style="font-size:9px;color:#888;margin-bottom:4px;">Base: WACC 10.0% / TGR 3.5% → $144.61 ★ | Cours actuel: $135.58</div>
+    <div class="sens-grid">
+      <div class="sens-cell sens-header">WACC \ TGR</div>
+      <div class="sens-cell sens-header">2.5%</div>
+      <div class="sens-cell sens-header">3.0%</div>
+      <div class="sens-cell sens-header">3.5%</div>
+      <div class="sens-cell sens-header">4.0%</div>
+      <div class="sens-cell sens-header">4.5%</div>
+
+      <div class="sens-cell sens-header">9.0%</div>
+      <div class="sens-cell sens-bull">$171</div>
+      <div class="sens-cell sens-bull">$196</div>
+      <div class="sens-cell sens-bull">$232</div>
+      <div class="sens-cell sens-bull">$285</div>
+      <div class="sens-cell sens-bull">$376</div>
+
+      <div class="sens-cell sens-header">9.5%</div>
+      <div class="sens-cell sens-mid">$141</div>
+      <div class="sens-cell sens-mid">$159</div>
+      <div class="sens-cell sens-bull">$182</div>
+      <div class="sens-cell sens-bull">$217</div>
+      <div class="sens-cell sens-bull">$273</div>
+
+      <div class="sens-cell sens-header">10.0%</div>
+      <div class="sens-cell sens-bear">$119</div>
+      <div class="sens-cell sens-mid">$131</div>
+      <div class="sens-cell sens-base">$144 ★</div>
+      <div class="sens-cell sens-mid">$162</div>
+      <div class="sens-cell sens-bull">$185</div>
+
+      <div class="sens-cell sens-header">10.5%</div>
+      <div class="sens-cell sens-bear">$101</div>
+      <div class="sens-cell sens-bear">$110</div>
+      <div class="sens-cell sens-bear">$120</div>
+      <div class="sens-cell sens-mid">$132</div>
+      <div class="sens-cell sens-mid">$147</div>
+
+      <div class="sens-cell sens-header">11.0%</div>
+      <div class="sens-cell sens-bear">$87</div>
+      <div class="sens-cell sens-bear">$94</div>
+      <div class="sens-cell sens-bear">$101</div>
+      <div class="sens-cell sens-bear">$110</div>
+      <div class="sens-cell sens-bear">$120</div>
+
+      <div class="sens-cell sens-header">11.5%</div>
+      <div class="sens-cell sens-bear">$76</div>
+      <div class="sens-cell sens-bear">$81</div>
+      <div class="sens-cell sens-bear">$87</div>
+      <div class="sens-cell sens-bear">$93</div>
+      <div class="sens-cell sens-bear">$100</div>
+    </div>
+    <div style="display:flex;gap:16px;margin-top:6px;font-size:9px;">
+      <span style="color:#00ff41;">■ Haussier (&gt;$135)</span>
+      <span style="color:#ffcc00;">■ Base (~$144)</span>
+      <span style="color:#ff8c00;">■ Neutre ($119-$141)</span>
+      <span style="color:#ff4444;">■ Baissier (&lt;$120)</span>
+    </div>
+  </div>
+
+  <!-- PANEL 9: PROJECTIONS -->
+  <div class="panel">
+    <div class="panel-title"><span class="cmd">FA</span> PROJECTIONS FINANCIÈRES</div>
+    <table>
+      <tr><th>Année</th><th>Revenus</th><th>Croiss.</th><th>Mg EBIT</th><th>FCF</th></tr>
+      <tr><td class="lbl">FY2023A</td><td class="val">$27Md</td><td class="val">—</td><td class="val">15.7%</td><td class="val">$5.7Md</td></tr>
+      <tr><td class="lbl">FY2024A</td><td class="val">$61Md</td><td class="up">+126%</td><td class="val">54.1%</td><td class="val">$27Md</td></tr>
+      <tr><td class="lbl">FY2025A</td><td class="val">$130Md</td><td class="up">+114%</td><td class="val">62.4%</td><td class="val">$61Md</td></tr>
+      <tr class="base-row"><td class="lbl">FY2026E</td><td class="up">$219Md</td><td class="up">+68%</td><td class="neu">60.0%</td><td class="up">$109Md</td></tr>
+      <tr class="base-row"><td class="lbl">FY2027E</td><td class="up">$303Md</td><td class="up">+38%</td><td class="neu">60.0%</td><td class="up">$151Md</td></tr>
+      <tr class="base-row"><td class="lbl">FY2028E</td><td class="up">$387Md</td><td class="up">+28%</td><td class="neu">60.0%</td><td class="up">$193Md</td></tr>
+      <tr class="base-row"><td class="lbl">FY2030E</td><td class="val">$539Md</td><td class="val">+16%</td><td class="neu">55.0%</td><td class="val">$245Md</td></tr>
+    </table>
+    <hr class="section-divider">
+    <div style="font-size:9px;color:#888;margin:4px 0 2px;">PART DE MARCHÉ ESTIMÉE</div>
+    <div class="bar-row">
+      <span class="bar-label">NVDA (GPU IA)</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:75%;background:#ff8c00;"></div></div>
+      <span class="bar-pct">~75%</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">AMD</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:12%;background:#888;"></div></div>
+      <span class="bar-pct" style="color:#888;">~12%</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">Custom Silicon</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:10%;background:#555;"></div></div>
+      <span class="bar-pct" style="color:#555;">~10%</span>
+    </div>
+    <div class="bar-row">
+      <span class="bar-label">Autres</span>
+      <div class="bar-outer"><div class="bar-inner" style="width:3%;background:#333;"></div></div>
+      <span class="bar-pct" style="color:#333;">~3%</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- STATUS BAR -->
+<div class="status-bar">
+  <span>NVDA US Equity | Analyse Claude Code | 27/05/2026</span>
+  <span>Sources: NVDA FY2025 10-K | Damodaran ERP | Consensus sell-side estimé</span>
+  <span class="ok">■ 3/3 AGENTS COMPLÉTÉS</span>
+  <span>DCF ✓ | COMPS ✓ | SECTEUR ✓</span>
+  <span class="blink">■</span> LIVE
+</div>
+
+<!-- DISCLAIMER -->
+<div class="disclaimer">
+  ⚠️ AVERTISSEMENT — Cette analyse est produite à des fins informatives uniquement et ne constitue pas un conseil en investissement, une recommandation d'achat ou de vente, ni une sollicitation.
+  Les estimations sont basées sur des modèles financiers et des données publiques disponibles. Tout investissement comporte des risques, y compris la perte du capital investi.
+  Consultez un conseiller financier agréé avant toute décision d'investissement. Les performances passées ne préjugent pas des performances futures.
+</div>
+
+<script>
+  function updateClock() {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    document.getElementById('clock').textContent =
+      `2026-05-27  ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}  ■ LIVE`;
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
+</script>
+</body>
+</html>

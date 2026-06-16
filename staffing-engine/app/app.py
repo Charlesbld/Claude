@@ -26,6 +26,7 @@ from staffing import reporting  # noqa: E402
 from staffing.timespine import BUSINESS_TZ  # noqa: E402
 
 PROCESSED = ROOT / "data" / "processed"
+RAW = ROOT / "data" / "raw"
 
 st.set_page_config(page_title="Moteur de staffing — couverture 15 min", layout="wide")
 
@@ -53,10 +54,23 @@ def fmt(n, suffix=""):
     return f"{n:,.0f}{suffix}"
 
 
+# --- Amorçage : génère données + pipeline si absents (déploiement cloud) -----
+@st.cache_resource(show_spinner="Initialisation : génération des données et calcul du pipeline…")
+def ensure_outputs():
+    import subprocess
+    if (PROCESSED / "matching.parquet").exists():
+        return
+    if not (RAW / "dim_team.csv").exists():
+        subprocess.run([sys.executable, str(ROOT / "scripts" / "generate_synthetic_data.py")],
+                       cwd=str(ROOT), check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "run_pipeline.py")],
+                   cwd=str(ROOT), check=True)
+
+
 # --- Chargement --------------------------------------------------------------
+ensure_outputs()
 if not (PROCESSED / "matching.parquet").exists():
-    st.error("Aucune sortie trouvée. Lancez d'abord :\n\n"
-             "`python scripts/run_pipeline.py`")
+    st.error("Échec de l'initialisation. Lancez `python scripts/run_pipeline.py` en local.")
     st.stop()
 
 mtime = (PROCESSED / "matching.parquet").stat().st_mtime

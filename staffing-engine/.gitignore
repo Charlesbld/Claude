@@ -1,0 +1,15 @@
+# Sorties régénérables du pipeline (parquet + meta)
+data/processed/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Streamlit / venv / IDE
+.streamlit/secrets.toml
+.venv/
+venv/
+.vscode/
+.idea/

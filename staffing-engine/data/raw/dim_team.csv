@@ -1,0 +1,8 @@
+team_id,team_label,level,sourcing,country_code,timezone,headcount,productivity,hourly_cost
+EXT_MANILA,BPO Manille,1,external,PH,Asia/Manila,80,0.92,16.0
+EXT_CASA,BPO Casablanca,1,external,MA,Africa/Casablanca,70,0.95,18.0
+EXT_TANA,BPO Antananarivo,1,external,MG,Indian/Antananarivo,55,0.9,14.0
+EXT_TUNIS,BPO Tunis,1,external,TN,Africa/Tunis,40,0.93,17.0
+INT_PARIS,Équipe interne Paris,2,internal,FR,Europe/Paris,60,1.05,45.0
+INT_BARCELONA,Équipe interne Barcelone,2,internal,ES,Europe/Madrid,45,1.0,38.0
+INT_LISBON,Équipe interne Lisbonne,2,internal,PT,Europe/Lisbon,35,1.0,32.0

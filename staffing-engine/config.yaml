@@ -1,0 +1,47 @@
+# =============================================================================
+# Configuration du moteur de staffing — couche B (paramètres) + périmètre du run
+# =============================================================================
+# Tout l'horizon est exprimé en UTC. `business_timezone` ne sert qu'à l'affichage
+# (axe des heatmaps en heure de Paris), jamais au calcul.
+
+random_seed: 42
+business_timezone: Europe/Paris
+
+# --- A1 : bornes du time spine UTC -------------------------------------------
+# La demande est ancrée sur `anchor_month`. On garde ±1 jour de marge pour
+# absorber le report de fuseau (un contact local du 1er juin tôt le matin à
+# Manille tombe la veille en UTC, etc.).
+horizon:
+  start: "2026-05-31"
+  end: "2026-07-02"
+  anchor_month: "2026-06"
+
+# --- Périmètre par défaut du run (filtrage) ----------------------------------
+# `null` = pas de filtre. Surchargé par les options CLI de run_pipeline.py.
+# Le MVP (étape 1) = {levels: [1], regions: ["FR"], une journée type}.
+scope:
+  levels: null          # ex. [1]
+  regions: null         # ex. ["FR"]
+  start: null           # ex. "2026-06-16" (journée type, un mardi)
+  end: null
+
+# --- B2 / B4 : hypothèses de service par level -------------------------------
+# target_occupancy / shrinkage pilotent la conversion charge -> ETP requis (C3).
+# Ce sont des CIBLES ; l'occupation réelle est recalculée en sortie (E2).
+levels:
+  1:
+    label: "Level 1 — Prestataires externes"
+    sourcing: external
+    target_occupancy: 0.85
+    max_occupancy: 0.92
+    shrinkage: 0.30        # pauses + absentéisme + formation
+    sla_seconds: 60
+    safety_margin: 0.05    # marge de sécurité appliquée à l'ETP cible (planif.)
+  2:
+    label: "Level 2 — Équipes internes"
+    sourcing: internal
+    target_occupancy: 0.80
+    max_occupancy: 0.88
+    shrinkage: 0.28
+    sla_seconds: 120
+    safety_margin: 0.05

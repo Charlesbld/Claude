@@ -23,6 +23,8 @@ def render_forecast():
         "On compare les **PAX** et les **tâches** *réels* (ingérés par CSV, à titre indicatif) "
         "au *forecast* (PAX prévus × **contact rate** retenu). Objectif : voir si un écart vient "
         "des **PAX** ou du **contact rate**, et **ajuster le contact rate** en direct.")
+    st.caption("Le forecast est tracé sur **tous les mois** ; le réel s'arrête au dernier mois connu "
+               "(au-delà = forecast seul).")
 
     av = C.actuals(C.db_version())
     regions = C.table("region")

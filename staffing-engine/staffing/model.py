@@ -127,17 +127,23 @@ def required_by_level(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
 
 # --- comparaison réel vs forecast -------------------------------------------
 def actuals_vs_forecast(db_path=db.DB_PATH) -> pd.DataFrame:
+    """Réel vs forecast sur TOUS les mois forecastés.
+
+    L'univers est le forecast complet (contact_rate_forecast × pax_forecast) ; le
+    réel (PAX, tâches) est ajouté en jointure gauche → les mois futurs n'ont que
+    le forecast (réel = NaN).
+    """
     paxr = db.read_table("pax_real", db_path).rename(columns={"pax": "pax_real"})
     paxf = db.read_table("pax_forecast", db_path).rename(columns={"pax": "pax_forecast"})
     tr = db.read_table("tasks_real", db_path).rename(columns={"tasks": "tasks_real"})
     crf = db.read_table("contact_rate_forecast", db_path).rename(columns={"contact_rate": "cr_forecast"})
     gmap = db.read_table("group_map", db_path)
 
-    df = (tr.merge(paxr, on=["month", "region_id", "supply_id"], how="left")
-          .merge(paxf, on=["month", "region_id", "supply_id"], how="left")
-          .merge(crf, on=["month", "region_id", "supply_id", "task_type_id"], how="left")
+    df = (crf.merge(paxf, on=["month", "region_id", "supply_id"], how="left")
           .merge(gmap[["month", "region_id", "supply_id", "group_id"]],
-                 on=["month", "region_id", "supply_id"], how="left"))
-    df["cr_real"] = np.where(df["pax_real"] > 0, df["tasks_real"] / df["pax_real"], np.nan)
+                 on=["month", "region_id", "supply_id"], how="left")
+          .merge(paxr, on=["month", "region_id", "supply_id"], how="left")
+          .merge(tr, on=["month", "region_id", "supply_id", "task_type_id"], how="left"))
+    df["cr_real"] = np.where(df["pax_real"].fillna(0) > 0, df["tasks_real"] / df["pax_real"], np.nan)
     df["tasks_forecast"] = df["pax_forecast"] * df["cr_forecast"]
     return df.sort_values(["month", "region_id", "supply_id", "task_type_id"]).reset_index(drop=True)

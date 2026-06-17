@@ -1,26 +1,16 @@
-"""Moteur de staffing / capacity planning au pas de 15 min (UTC).
+"""Moteur de staffing / capacity planning au pas de 15 min (UTC) — V2.
 
-Architecture en 6 couches (cf. README) :
+Couches :
+    timespine — A1 : time spine UTC 15 min, calendriers, fuseaux
+    db        — couche SQLite + registre des tables (entrée & éditables)
+    model     — demande forecast → buckets, + table réel vs forecast
+    erlang    — dimensionnement Erlang C (ETP requis par bucket × level)
+    optimizer — répartition d'agents au coût minimal (IP) + couverture
+    reporting — restitution (heatmap, trous, synthèses)
 
-    A. referentials  — référentiels (calendrier, supply, region, group, tâches, équipes)
-    B. params        — paramètres (AHT, shrinkage, occupation cible, coûts, SLA)
-    C. demand        — pipeline de charge  (mensuel -> jour -> bucket -> ETP requis)
-    D. supply        — pipeline de capacité (shifts -> capacité dispo par bucket)
-    E. matching      — rapprochement requis vs dispo (couverture, écarts, occupation réelle)
-    F. reporting     — restitution (heatmap, synthèse coûts/ETP, trous)
-
-La maille pivot du modèle est : 1 bucket de 15 min (UTC) x 1 segment (level + type
-de tâche). Demande et offre produisent toutes deux cette maille pour pouvoir se joindre.
+Maille pivot : 1 bucket de 15 min (UTC) × 1 level (capacité mutualisée intra-level).
 """
 
-from . import timespine, referentials, params, demand, supply, matching, reporting
+from . import db, erlang, model, optimizer, reporting, timespine
 
-__all__ = [
-    "timespine",
-    "referentials",
-    "params",
-    "demand",
-    "supply",
-    "matching",
-    "reporting",
-]
+__all__ = ["timespine", "db", "model", "erlang", "optimizer", "reporting"]

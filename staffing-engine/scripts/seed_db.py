@@ -67,7 +67,8 @@ def _intraday() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def main() -> None:
+def main(db_path=None) -> None:
+    db_path = db_path or db.DB_PATH
     rng = np.random.default_rng(SEED)
     region_scale = {r: sc for r, _, _, _, sc in REGIONS}
     supply_share = {s: sh for s, _, sh in SUPPLIES}
@@ -144,10 +145,10 @@ def main() -> None:
         "team_availability": team_availability, "profile_dow": profile_dow,
         "profile_intraday": _intraday(),
         "allocation": pd.DataFrame(columns=["dow", "slot_utc", "team_id", "agents"]),
-    })
-    print(f"[OK] Base SQLite amorcée : {db.DB_PATH}")
-    for name in db.list_tables():
-        print(f"   - {name:24s} {len(db.read_table(name)):>6d} lignes")
+    }, db_path)
+    print(f"[OK] Base SQLite amorcée : {db_path}")
+    for name in db.list_tables(db_path):
+        print(f"   - {name:24s} {len(db.read_table(name, db_path)):>6d} lignes")
 
 
 if __name__ == "__main__":

@@ -6,5 +6,5 @@ pyyaml>=6.0        # config
 holidays>=0.45     # calendriers par pays (A1)
 streamlit>=1.30    # restitution (F)
 plotly>=5.18       # heatmap / graphes (F)
-pulp>=2.7          # optimiseur de répartition (IP, solveur CBC)
+pulp>=2.7,<4       # optimiseur de répartition (IP, solveur CBC)
 pytest>=8.0        # validation des calculs

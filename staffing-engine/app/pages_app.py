@@ -114,10 +114,14 @@ def render_coverage():
         cc = st.columns(3)
         pct = cc[0].slider("Couvrir le percentile de demande", 0.5, 1.0, 1.0, 0.05,
                            help="1.0 = couvre le pire jour du même jour de semaine.")
-        lens = cc[1].multiselect("Durées de shift (h)", [4, 6, 8], default=[6, 8])
+        lens = cc[1].multiselect(
+            "Durées de shift (h)", [1, 2, 4, 6, 8], default=[6, 8],
+            help="Blocs autorisés. Des shifts courts collent mieux à la demande (coût plus bas) "
+                 "mais sont peu réalistes en exploitation.")
         if cc[2].button("🚀 (Ré)optimiser", type="primary"):
+            lengths = tuple(int(h * 4) for h in (lens or [6, 8]))
             with st.spinner("Optimisation…"):
-                C.run_optimizer(month, percentile=pct, shift_lengths=tuple(int(h * 4) for h in lens))
+                C.run_optimizer(month, percentile=pct, shift_lengths=lengths)
             st.success("Allocation optimisée.")
             st.rerun()
 

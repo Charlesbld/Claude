@@ -350,6 +350,32 @@ def render_explorer():
 # =============================================================================
 # 4) ÉDITION DES RÉFÉRENTIELS
 # =============================================================================
+def _group_map_editor():
+    """Pivot éditable du mapping group : combos (Region×Supply) × mois, actif/inactif."""
+    gm = C.table("group_map")
+    cols_order = list(gm.columns)
+    months = sorted(gm["month"].unique())
+    piv = (gm.pivot_table(index=["group_id", "region_id", "supply_id"], columns="month",
+                          values="active", fill_value=0)
+           .reindex(columns=months, fill_value=0).reset_index())
+    for m in months:
+        piv[m] = piv[m].astype(bool)
+    st.caption("Cochez les mois où chaque **group** (Region×Supply) est actif. "
+               "Vous pouvez ajouter une ligne (renseignez group_id / region_id / supply_id).")
+    colcfg = {m: st.column_config.CheckboxColumn(m[2:]) for m in months}
+    colcfg |= {c: st.column_config.TextColumn(c) for c in ["group_id", "region_id", "supply_id"]}
+    edited = st.data_editor(piv, width="stretch", hide_index=True, num_rows="dynamic",
+                            column_config=colcfg, key="gm_pivot")
+    if st.button("💾 Enregistrer le mapping group", type="primary"):
+        e = edited.dropna(subset=["group_id", "region_id", "supply_id"])
+        long = e.melt(id_vars=["group_id", "region_id", "supply_id"], value_vars=months,
+                      var_name="month", value_name="active")
+        long["active"] = long["active"].fillna(False).astype(int)
+        C.save_table("group_map", long[cols_order])
+        st.success("Mapping group enregistré.")
+        st.rerun()
+
+
 def render_editor():
     st.header("✏️ Éditer les données")
     st.markdown("Modifiez directement les tables d'entrée. **« Enregistrer »** écrit en base SQLite "
@@ -360,6 +386,9 @@ def render_editor():
     spec = db.TABLES[name]
     if spec.note:
         st.info(spec.note)
+    if name == "group_map":
+        _group_map_editor()
+        return
     df = C.table(name)
     edited = st.data_editor(df, width="stretch", hide_index=True, num_rows="dynamic", key=f"ed_{name}")
     if st.button("💾 Enregistrer", type="primary"):

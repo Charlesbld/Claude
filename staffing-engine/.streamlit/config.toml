@@ -8,3 +8,7 @@ font = "sans serif"
 
 [server]
 headless = true
+
+[browser]
+# aucune télémétrie : l'app ne contacte jamais internet à l'exécution
+gatherUsageStats = false

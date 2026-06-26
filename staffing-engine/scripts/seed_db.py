@@ -35,16 +35,52 @@ REGION_SUPPLIES = {"FR": ["AIR", "RAIL", "BUS", "FERRY"], "ES": ["AIR", "RAIL", 
 TASK_TYPES = [("GEN_INQUIRY", "Demande générale", 1, 0.080, 300),
               ("MODERATION", "Modération", 1, 0.015, 150),
               ("COMPLEX_CASE", "Dossier complexe (escalade)", 2, 0.012, 720)]
+
+GROUPS = [
+    ("DIRECT_AIR", "Vols directs"),
+    ("OTA",        "OTA / Distributeurs"),
+    ("RAIL",       "Rail"),
+    ("BUS",        "Bus"),
+    ("FERRY",      "Ferry"),
+]
+
+REGION_GROUP_SUPPLY = {
+    # region_id: {supply_id: group_id}
+    "FR": {"AIR": "DIRECT_AIR", "RAIL": "RAIL", "BUS": "BUS", "FERRY": "FERRY"},
+    "ES": {"AIR": "DIRECT_AIR", "RAIL": "RAIL", "BUS": "BUS"},
+    "IT": {"AIR": "OTA",        "RAIL": "RAIL",               "FERRY": "FERRY"},
+    "GB": {"AIR": "DIRECT_AIR",                               "FERRY": "FERRY"},
+}
+
 TEAMS = [  # team_id, label, level, sourcing, country, tz, productivity, hourly_cost, max_agents
-    ("EXT_MANILA", "BPO Manille", 1, "external", "PH", "Asia/Manila", 0.92, 16.0, 200),
-    ("EXT_CASA", "BPO Casablanca", 1, "external", "MA", "Africa/Casablanca", 0.95, 18.0, 200),
-    ("EXT_TANA", "BPO Antananarivo", 1, "external", "MG", "Indian/Antananarivo", 0.90, 14.0, 200),
-    ("EXT_TUNIS", "BPO Tunis", 1, "external", "TN", "Africa/Tunis", 0.93, 17.0, 150),
-    ("INT_PARIS", "Équipe interne Paris", 2, "internal", "FR", "Europe/Paris", 1.05, 45.0, 60)]
+    ("EXT_MANILA", "BPO Manille",           1, "external", "PH", "Asia/Manila",          0.92, 16.0, 200),
+    ("EXT_CASA",   "BPO Casablanca",         1, "external", "MA", "Africa/Casablanca",    0.95, 18.0, 200),
+    ("EXT_TANA",   "BPO Antananarivo",       1, "external", "MG", "Indian/Antananarivo",  0.90, 14.0, 200),
+    ("EXT_TUNIS",  "BPO Tunis",              1, "external", "TN", "Africa/Tunis",         0.93, 17.0, 150),
+    ("EXT_DGKAR",  "BPO Dakar",              1, "external", "SN", "Africa/Abidjan",       0.91, 15.0, 150),
+    ("INT_PARIS",  "Équipe interne Paris",   2, "internal", "FR", "Europe/Paris",         1.05, 45.0,  60),
+]
+
 # Fenêtres de disponibilité (heure locale) — larges, l'optimiseur place les agents dedans.
-AVAILABILITY = [("EXT_MANILA", "06:00", "22:00"), ("EXT_CASA", "08:00", "00:00"),
-                ("EXT_TANA", "09:00", "01:00"), ("EXT_TUNIS", "00:00", "08:00"),
+AVAILABILITY = [("EXT_MANILA", "00:00", "00:00"), ("EXT_CASA", "00:00", "00:00"),
+                ("EXT_TANA", "00:00", "00:00"), ("EXT_TUNIS", "00:00", "00:00"),
+                ("EXT_DGKAR", "00:00", "00:00"),
                 ("INT_PARIS", "08:00", "20:00")]
+
+TEAM_GROUP = [
+    ("EXT_MANILA", "DIRECT_AIR"),
+    ("EXT_CASA",   "RAIL"),
+    ("EXT_TANA",   "OTA"),
+    ("EXT_TUNIS",  "FERRY"),
+    ("EXT_DGKAR",  "BUS"),
+    # INT_PARIS (L2) handles escalations for all groups
+    ("INT_PARIS",  "DIRECT_AIR"),
+    ("INT_PARIS",  "RAIL"),
+    ("INT_PARIS",  "OTA"),
+    ("INT_PARIS",  "FERRY"),
+    ("INT_PARIS",  "BUS"),
+]
+
 SERVICE_PARAMS = [  # cible Erlang C : 95% en ≤120s pour L1
     {"level": 1, "sl_target": 0.95, "sl_seconds": 120, "shrinkage": 0.30, "max_occupancy": 0.92},
     {"level": 2, "sl_target": 0.90, "sl_seconds": 300, "shrinkage": 0.28, "max_occupancy": 0.88}]
@@ -80,13 +116,16 @@ def main(db_path=None) -> None:
     task_type = pd.DataFrame([(t, lbl, lvl) for t, lbl, lvl, _, _ in TASK_TYPES],
                              columns=["task_type_id", "task_type_label", "level"])
 
-    # group_map : (month, region, supply) actifs -> group_id
+    # group reference table
+    group = pd.DataFrame(GROUPS, columns=["group_id", "group_label"])
+
+    # group_map : (month, region, supply) actifs -> group_id (from REGION_GROUP_SUPPLY)
     gm = []
     for month in MONTHS:
-        for reg, sups in REGION_SUPPLIES.items():
-            for sup in sups:
+        for reg, sup_groups in REGION_GROUP_SUPPLY.items():
+            for sup, grp in sup_groups.items():
                 gm.append({"month": month, "region_id": reg, "supply_id": sup,
-                           "group_id": f"{sup}_{reg}", "active": 1})
+                           "group_id": grp, "active": 1})
     group_map = pd.DataFrame(gm)
 
     # PAX forecast (12 mois) + PAX réels (jan→juin, avec biais régional)
@@ -137,12 +176,17 @@ def main(db_path=None) -> None:
     team_availability = pd.DataFrame(avail)
     profile_dow = pd.DataFrame({"dow": range(7), "weight": [0.85, 0.80, 0.85, 0.95, 1.30, 1.45, 1.15]})
 
+    team_group = pd.DataFrame(TEAM_GROUP, columns=["team_id", "group_id"])
+
     db.seed({
-        "region": region, "supply": supply, "task_type": task_type, "group_map": group_map,
+        "region": region, "supply": supply, "task_type": task_type,
+        "group": group, "group_map": group_map,
         "pax_real": pax_real, "pax_forecast": pax_forecast, "tasks_real": tasks_real,
         "contact_rate_forecast": contact_rate_forecast, "param_aht": param_aht,
         "service_params": pd.DataFrame(SERVICE_PARAMS), "team": team,
-        "team_availability": team_availability, "profile_dow": profile_dow,
+        "team_availability": team_availability,
+        "team_group": team_group,
+        "profile_dow": profile_dow,
         "profile_intraday": _intraday(),
         "allocation": pd.DataFrame(columns=["dow", "slot_utc", "team_id", "agents"]),
     }, db_path)

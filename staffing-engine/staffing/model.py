@@ -102,10 +102,11 @@ def build_forecast_demand(month: str, db_path=db.DB_PATH, levels=None, regions=N
     return demand.sort_values(["bucket_utc", "level", "task_type_id", "group_id"]).reset_index(drop=True)
 
 
-# --- Erlang C : ETP requis par (bucket, level) -------------------------------
-def required_by_level(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
+# --- Erlang C : ETP requis par (bucket, level, group_id) ---------------------
+def required_by_group(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
+    """ETP requis par (bucket_utc × level × group_id) — Erlang C par groupe commercial."""
     sp = db.read_table("service_params", db_path).set_index("level")
-    pooled = demand.groupby(["bucket_utc", "level"], as_index=False).agg(
+    pooled = demand.groupby(["bucket_utc", "level", "group_id"], as_index=False).agg(
         contacts=("contacts", "sum"),
         workload_hours=("workload_hours", "sum"),
         workload_seconds=("workload_hours", lambda s: s.sum() * 3600.0),
@@ -113,16 +114,53 @@ def required_by_level(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
     pooled["aht_eff"] = np.where(pooled["contacts"] > 0,
                                  pooled["workload_seconds"] / pooled["contacts"], 0.0)
     frames = []
-    for level, sub in pooled.groupby("level"):
+    for (level, group_id), sub in pooled.groupby(["level", "group_id"]):
+        if level not in sp.index:
+            continue
         p = sp.loc[level]
         sub = sub.copy()
         sub["agents_online"] = erlang.required_agents_series(
-            sub["contacts"], sub["aht_eff"], p["sl_target"], p["sl_seconds"],
-            p["max_occupancy"], INTERVAL_SECONDS)
-        sub["required_fte"] = sub["agents_online"] / (1.0 - p["shrinkage"])
-        sub["shrinkage"] = p["shrinkage"]
+            sub["contacts"], sub["aht_eff"], float(p["sl_target"]), float(p["sl_seconds"]),
+            float(p["max_occupancy"]), INTERVAL_SECONDS)
+        sub["required_fte"] = sub["agents_online"] / (1.0 - float(p["shrinkage"]))
+        sub["shrinkage"] = float(p["shrinkage"])
         frames.append(sub)
+    if not frames:
+        return pd.DataFrame(columns=["bucket_utc", "level", "group_id", "contacts",
+                                     "workload_hours", "aht_eff", "agents_online",
+                                     "required_fte", "shrinkage"])
     return pd.concat(frames, ignore_index=True).drop(columns="workload_seconds")
+
+
+def required_by_level(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
+    """Backward-compat alias: pools required_by_group across groups for tests."""
+    by_group = required_by_group(demand, db_path)
+    if by_group.empty:
+        return by_group.drop(columns=["group_id"], errors="ignore")
+    # re-aggregate across groups: sum contacts/workload, average shrinkage
+    sp = db.read_table("service_params", db_path).set_index("level")
+    pooled = by_group.groupby(["bucket_utc", "level"], as_index=False).agg(
+        contacts=("contacts", "sum"),
+        workload_hours=("workload_hours", "sum"),
+        workload_seconds=("workload_hours", lambda s: s.sum() * 3600.0),
+        shrinkage=("shrinkage", "first"),
+        aht_eff=("aht_eff", "mean"),
+    )
+    # re-run Erlang C on the pooled demand (cross-group pooling gives better SLA)
+    frames = []
+    for level, sub in pooled.groupby("level"):
+        if level not in sp.index:
+            continue
+        p = sp.loc[level]
+        sub = sub.copy()
+        sub["agents_online"] = erlang.required_agents_series(
+            sub["contacts"], sub["aht_eff"], float(p["sl_target"]), float(p["sl_seconds"]),
+            float(p["max_occupancy"]), INTERVAL_SECONDS)
+        sub["required_fte"] = sub["agents_online"] / (1.0 - float(p["shrinkage"]))
+        frames.append(sub)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True).drop(columns="workload_seconds", errors="ignore")
 
 
 # --- comparaison réel vs forecast -------------------------------------------

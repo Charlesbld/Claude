@@ -15,7 +15,523 @@ DIV = "RdYlGn"
 
 
 # =============================================================================
-# 1) DEMANDE — Réel vs Forecast
+# ① Données sources
+# =============================================================================
+def render_sources():
+    """① Données sources — aperçu de toutes les tables d'entrée."""
+    st.header("📋 ① Données sources")
+    st.markdown("""
+    Cette page montre l'état des tables d'entrée du modèle.
+    Tout le moteur est piloté par ces données — on peut les modifier dans **Éditer les données**.
+    """)
+    month = C.month_selector()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("PAX forecast")
+        pf = C.table("pax_forecast")
+        d = pf[pf["month"] == month]
+        fig = px.bar(d, x="region_id", y="pax", color="supply_id",
+                     title=f"PAX par région × supply — {month}")
+        fig.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        st.subheader("Contact rate forecast")
+        crf = C.table("contact_rate_forecast")
+        d = crf[crf["month"] == month]
+        fig = px.bar(d, x="task_type_id", y="contact_rate", color="region_id",
+                     barmode="group", title=f"Contact rate par tâche — {month}")
+        fig.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Groupes commerciaux & affectation équipes")
+    c3, c4 = st.columns(2)
+    with c3:
+        gm = C.table("group_map")
+        grp = C.table("group")
+        d = (gm[(gm["month"] == month) & (gm["active"] == 1)]
+             .merge(grp, on="group_id", how="left"))
+        st.dataframe(d[["region_id", "supply_id", "group_id", "group_label"]]
+                     .sort_values(["group_id", "region_id"]),
+                     width="stretch", hide_index=True)
+    with c4:
+        tg = C.table("team_group")
+        tm = C.table("team")[["team_id", "team_label", "level"]]
+        d = tg.merge(tm, on="team_id")
+        st.dataframe(d.sort_values(["group_id", "level"]),
+                     width="stretch", hide_index=True)
+
+
+# =============================================================================
+# ② Contacts mensuels
+# =============================================================================
+def render_demand_monthly():
+    """② Contacts mensuels = PAX × contact rate."""
+    st.header("✖️ ② Contacts mensuels")
+    st.markdown(r"""
+    **Formule** : `contacts_mensuels = PAX_forecast × contact_rate_forecast`
+
+    Pour chaque combinaison `(mois, région, supply, tâche)`, on multiplie les PAX attendus par le
+    taux de contact retenu. C'est la **base de toute la chaîne** — si ces deux chiffres sont faux,
+    tout le dimensionnement l'est aussi.
+    """)
+    month = C.month_selector()
+
+    pf = C.table("pax_forecast")
+    crf = C.table("contact_rate_forecast")
+    gmap = C.table("group_map")
+    grp = C.table("group")
+
+    base = (pf[pf["month"] == month]
+            .merge(crf[crf["month"] == month], on=["month", "region_id", "supply_id"])
+            .merge(gmap[(gmap["month"] == month) & (gmap["active"] == 1)]
+                   [["region_id", "supply_id", "group_id"]], on=["region_id", "supply_id"])
+            .merge(grp, on="group_id", how="left"))
+    base["contacts"] = base["pax"] * base["contact_rate"]
+
+    C.kpi_row([
+        ("Total contacts", f"{base['contacts'].sum():,.0f}"),
+        ("PAX total", f"{base['pax'].sum():,.0f}"),
+        ("CR moyen (toutes tâches)", f"{base['contacts'].sum() / base['pax'].sum():.4f}" if base['pax'].sum() > 0 else "—"),
+        ("Régions actives", str(base["region_id"].nunique())),
+    ])
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Contacts par tâche")
+        d = base.groupby("task_type_id")["contacts"].sum().reset_index()
+        fig = px.bar(d, x="task_type_id", y="contacts", color="task_type_id",
+                     text_auto=".3s")
+        fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        st.subheader("Contacts par groupe")
+        d = base.groupby(["group_id", "task_type_id"])["contacts"].sum().reset_index()
+        fig = px.bar(d, x="group_id", y="contacts", color="task_type_id")
+        fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), legend_title="")
+        st.plotly_chart(fig, width="stretch")
+
+    st.subheader("Tableau détaillé")
+    disp = base[["region_id", "supply_id", "group_id", "task_type_id", "pax", "contact_rate", "contacts"]].copy()
+    disp["contacts"] = disp["contacts"].round(0).astype(int)
+    st.dataframe(disp.sort_values(["group_id", "region_id", "task_type_id"]),
+                 width="stretch", hide_index=True)
+
+
+# =============================================================================
+# ③ Profils de répartition
+# =============================================================================
+def render_demand_profiles():
+    """③ Profils de répartition — du mensuel vers les buckets 15 min."""
+    st.header("📅 ③ Profils de répartition")
+    st.markdown(r"""
+    La demande mensuelle est **découpée** en deux étapes successives :
+
+    1. **Profil hebdomadaire** : chaque jour de semaine reçoit un poids → contacts du jour = contacts_mois × w_dow / Σw_dow
+    2. **Profil intraday** : dans chaque jour, chaque créneau de 15 min reçoit un poids → contacts_bucket = contacts_jour × w_slot
+
+    Ces profils pilotent la **forme de la courbe de charge** — ils sont modifiables dans *Éditer les données*.
+    """)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Profil jour de semaine (dow)")
+        dow_df = C.table("profile_dow")
+        jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+        dow_df = dow_df.copy()
+        dow_df["jour"] = dow_df["dow"].map(lambda d: jours[d])
+        fig = px.bar(dow_df, x="jour", y="weight", color="weight",
+                     color_continuous_scale="Blues",
+                     text=dow_df["weight"].map(lambda w: f"{w:.2f}"))
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
+                          showlegend=False, coloraxis_showscale=False,
+                          yaxis_title="Poids relatif")
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Le samedi et dimanche ont un poids plus élevé → **pics de week-end**.")
+    with c2:
+        st.subheader("Profil intraday par jour de semaine")
+        intra = C.table("profile_intraday")
+        intra = intra.copy()
+        intra["heure"] = (intra["slot_local"] * 15 // 60).astype(str).str.zfill(2) + "h"
+        piv = intra.pivot_table(index="heure", columns="dow", values="weight")
+        piv.columns = [jours[d][:3] for d in piv.columns]
+        fig = px.imshow(piv, aspect="auto", color_continuous_scale="Blues",
+                        labels=dict(x="Jour", y="Heure locale", color="Poids"))
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Double pic matin/soir visible. Heure locale (Europe/Paris).")
+
+    st.subheader("Simulation de répartition")
+    st.markdown("Visualisez comment **1 000 contacts mensuels** se répartissent sur la semaine et la journée :")
+    contacts_m = 1000
+    dow_df2 = C.table("profile_dow").set_index("dow")["weight"]
+    dow_w_norm = dow_df2 / dow_df2.sum()
+    intra2 = C.table("profile_intraday").copy()
+    intra2["weight_norm"] = intra2.groupby("dow")["weight"].transform(lambda x: x / x.sum())
+    sim = []
+    jours = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
+    for dow_idx, dow_w in dow_w_norm.items():
+        day_contacts = contacts_m * dow_w
+        slots = intra2[intra2["dow"] == dow_idx].copy()
+        slots["contacts_bucket"] = day_contacts * slots["weight_norm"]
+        slots["heure"] = slots["slot_local"] * 15 // 60
+        sim.append(slots[["dow", "heure", "contacts_bucket"]])
+    sim_df = pd.concat(sim).groupby(["dow", "heure"])["contacts_bucket"].sum().reset_index()
+    sim_df["jour"] = sim_df["dow"].map(lambda d: jours[d])
+    fig3 = px.line(sim_df, x="heure", y="contacts_bucket", color="jour",
+                   labels={"heure": "Heure locale", "contacts_bucket": "Contacts / bucket (moy.)"})
+    fig3.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10), legend_title="")
+    st.plotly_chart(fig3, width="stretch")
+
+
+# =============================================================================
+# ④ Demande à 15 min
+# =============================================================================
+def render_demand_buckets():
+    """④ Demande à 15 min — résultat de la chaîne forecast → buckets UTC."""
+    from staffing.timespine import BUSINESS_TZ
+    st.header("⏱️ ④ Demande à 15 min")
+    st.markdown(r"""
+    Après application des profils, on obtient la **demande à la maille bucket** (UTC, 15 min).
+
+    - `workload_hours` = contacts × AHT / 3600
+    - La conversion heure locale → UTC peut créer des **décalages** selon le fuseau (ex. Manille ≠ Paris).
+    """)
+    month = C.month_selector()
+    v = C.db_version()
+    dem = C.demand(month, v)
+    if dem.empty:
+        st.warning("Aucune demande calculée pour ce mois.")
+        return
+
+    groups = sorted(dem["group_id"].unique())
+    levels = sorted(dem["level"].unique())
+    sel_group = st.multiselect("Groupe", groups, default=groups[:2] if len(groups) > 1 else groups)
+    sel_level = st.selectbox("Level", levels, format_func=lambda l: f"Level {l}")
+
+    sub = dem[(dem["level"] == sel_level)]
+    if sel_group:
+        sub = sub[sub["group_id"].isin(sel_group)]
+    if sub.empty:
+        st.info("Aucune donnée pour ce filtre.")
+        return
+
+    sub = sub.copy()
+    sub["local"] = sub["bucket_utc"].dt.tz_convert(BUSINESS_TZ)
+    sub["date"] = sub["local"].dt.date
+    sub["heure"] = sub["local"].dt.hour
+
+    # check conservation des contacts
+    pf = C.table("pax_forecast")
+    crf = C.table("contact_rate_forecast")
+    gmap = C.table("group_map")
+    base = (pf[pf["month"] == month]
+            .merge(crf[crf["month"] == month], on=["month", "region_id", "supply_id"])
+            .merge(gmap[(gmap["month"] == month) & (gmap["active"] == 1)]
+                   [["region_id", "supply_id", "group_id"]], on=["region_id", "supply_id"]))
+    expected_total = (base["pax"] * base["contact_rate"]).sum()
+    actual_total = dem["contacts"].sum()
+
+    C.kpi_row([
+        ("Contacts (tous groupes)", f"{actual_total:,.0f}"),
+        ("Contacts attendus (PAX×CR)", f"{expected_total:,.0f}"),
+        ("Conservation", f"{100 * actual_total / expected_total:.2f} %" if expected_total > 0 else "—"),
+        ("Workload total (h)", f"{dem['workload_hours'].sum():,.0f} h"),
+    ])
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Charge horaire sur le mois (Paris)")
+        hourly = sub.groupby(["date", "heure"])["workload_hours"].sum().reset_index()
+        hourly["ts"] = pd.to_datetime(hourly["date"].astype(str)) + pd.to_timedelta(hourly["heure"], unit="h")
+        fig = px.line(hourly, x="ts", y="workload_hours",
+                      labels={"ts": "Date", "workload_hours": "Workload (h/bucket 15min)"})
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        st.subheader("Heatmap time-of-day × date")
+        piv_h = hourly.pivot_table(index="heure", columns="date", values="workload_hours",
+                                   aggfunc="mean")
+        fig2 = px.imshow(piv_h, aspect="auto", color_continuous_scale="Blues",
+                         labels=dict(x="Jour", y="Heure (Paris)", color="Workload h"))
+        fig2.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig2, width="stretch")
+
+    st.subheader("Contribution par groupe")
+    by_grp = sub.groupby("group_id")["contacts"].sum().reset_index()
+    fig3 = px.pie(by_grp, values="contacts", names="group_id", hole=0.4)
+    fig3.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig3, width="stretch")
+
+
+# =============================================================================
+# ⑤ Erlang C
+# =============================================================================
+def render_erlang():
+    """⑤ Dimensionnement Erlang C — de la charge à l'ETP requis."""
+    from staffing.timespine import BUSINESS_TZ
+    st.header("📐 ⑤ Dimensionnement Erlang C")
+    st.markdown(r"""
+    **Erlang C** calcule, pour chaque bucket de 15 min, le **nombre minimal d'agents** pour tenir le SLA.
+
+    Paramètres (dans *Éditer → Objectifs de service*) :
+    - `sl_target` : ex. 95 % des appels traités en moins de `sl_seconds` = 120 s
+    - `shrinkage` : part du temps où un agent n'est pas disponible (pauses, formation…)
+    - `max_occupancy` : plafond d'occupation pour éviter la surcharge
+
+    **ETP requis** = `agents_online / (1 − shrinkage)` — le gross-up shrinkage convertit les
+    *agents au combiné* en *équivalents temps plein à planifier*.
+    """)
+    month = C.month_selector()
+    v = C.db_version()
+    req = C.required(month, v)
+    if req.empty:
+        st.warning("Aucune donnée de dimensionnement pour ce mois.")
+        return
+
+    sp = C.table("service_params")
+    st.subheader("Paramètres de service")
+    st.dataframe(sp, width="stretch", hide_index=True)
+
+    sel_group = st.selectbox("Groupe", sorted(req["group_id"].unique()))
+    sel_level = st.selectbox("Level", sorted(req["level"].unique()),
+                             format_func=lambda l: f"Level {l}")
+    sub = req[(req["group_id"] == sel_group) & (req["level"] == sel_level)].copy()
+    if sub.empty:
+        st.info("Aucune donnée pour ce filtre.")
+        return
+    sub["local"] = sub["bucket_utc"].dt.tz_convert(BUSINESS_TZ)
+
+    C.kpi_row([
+        ("ETP requis (pic)",    f"{sub['required_fte'].max():.1f}"),
+        ("Agents online (pic)", f"{sub['agents_online'].max():.1f}"),
+        ("Shrinkage gross-up",  f"× {1 / (1 - float(sub['shrinkage'].iloc[0])):.2f}"),
+        ("AHT moyen effectif",  f"{sub['aht_eff'].mean():.0f} s"),
+    ])
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Agents online vs ETP requis")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=sub["local"], y=sub["required_fte"],
+                                 name="ETP requis (planif.)", fill="tozeroy",
+                                 line=dict(color="#2c7fb8")))
+        fig.add_trace(go.Scatter(x=sub["local"], y=sub["agents_online"],
+                                 name="Agents online (combiné)",
+                                 line=dict(color="#74c476", dash="dash")))
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
+                          legend=dict(orientation="h", y=1.12), yaxis_title="ETP")
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        st.subheader("Charge brute vs Erlang C")
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=sub["local"],
+                                  y=sub["workload_hours"] / 0.25,
+                                  name="Charge brute (occ. 100 %)",
+                                  line=dict(color="#fdae61", dash="dot")))
+        fig2.add_trace(go.Scatter(x=sub["local"], y=sub["required_fte"],
+                                  name="ETP requis (avec marge SLA)",
+                                  line=dict(color="#d7301f")))
+        fig2.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10),
+                           legend=dict(orientation="h", y=1.12), yaxis_title="ETP")
+        st.plotly_chart(fig2, width="stretch")
+        st.caption("L'écart entre les deux courbes = **marge Erlang C** (agents pour absorber "
+                   "les files d'attente et tenir le SLA).")
+
+
+# =============================================================================
+# ⑥ COUVERTURE & COÛTS
+# =============================================================================
+def _local(df):
+    df = df.copy()
+    df["local"] = df["bucket_utc"].dt.tz_convert(BUSINESS_TZ)
+    df["date"] = df["local"].dt.date
+    return df
+
+
+def render_coverage():
+    st.header("🗓️ ⑥ Couverture & coûts")
+    month = C.month_selector()
+
+    with st.expander("⚙️ Optimiseur de répartition (coût minimal)", expanded=False):
+        st.markdown("Le bouton calcule, par **programmation linéaire**, la répartition d'agents la "
+                    "moins chère qui couvre l'ETP requis (Erlang C), **par groupe × jour de semaine**. "
+                    "Résultat éditable plus bas.")
+        cc = st.columns(3)
+        pct = cc[0].slider("Couvrir le percentile de demande", 0.5, 1.0, 1.0, 0.05,
+                           help="1.0 = couvre le pire jour du même jour de semaine.")
+        lens = cc[1].multiselect(
+            "Durées de shift (h)", [1, 2, 4, 6, 8], default=[6, 8],
+            help="Blocs autorisés. Des shifts courts collent mieux à la demande (coût plus bas) "
+                 "mais sont peu réalistes en exploitation.")
+        if cc[2].button("🚀 (Ré)optimiser", type="primary"):
+            lengths = tuple(int(h * 4) for h in (lens or [6, 8]))
+            with st.spinner("Optimisation…"):
+                C.run_optimizer(month, percentile=pct, shift_lengths=lengths)
+            st.success("Allocation optimisée.")
+            st.rerun()
+
+    cov = C.coverage(month, C.db_version())
+    matching, supply_team, demand = cov["matching"], cov["supply_team"], cov["demand"]
+    if supply_team.empty:
+        st.info("Aucune allocation pour ce mois. Ouvrez l'optimiseur ci-dessus et lancez « (Ré)optimiser ».")
+        return
+
+    # --- filtres -------------------------------------------------------------
+    f = st.columns(6)
+    level = f[0].selectbox("Level", sorted(matching["level"].unique()),
+                           format_func=lambda l: f"Level {l}")
+    all_groups = sorted(matching["group_id"].unique())
+    sel_groups = f[1].multiselect("Groupe", all_groups, default=all_groups)
+    dregions = f[2].multiselect("Région", sorted(demand["region_id"].unique()))
+    dsupply = f[3].multiselect("Supply", sorted(demand["supply_id"].unique()))
+    dtasks = f[4].multiselect("Type de tâche", sorted(demand["task_type_id"].unique()))
+    gran = f[5].radio("Granularité", ["15 min", "Heure", "Jour"], horizontal=False)
+
+    m = _local(matching[matching["level"] == level])
+    if sel_groups:
+        m = m[m["group_id"].isin(sel_groups)]
+    days = sorted(m["date"].unique())
+    if not days:
+        st.info("Aucune donnée pour ces filtres.")
+        return
+    day_sel = st.select_slider("Jours affichés", options=days,
+                               value=(days[0], days[-1]) if len(days) > 1 else (days[0], days[0]))
+    m = m[(m["date"] >= day_sel[0]) & (m["date"] <= day_sel[1])]
+
+    # KPI
+    C.kpi_row([
+        ("Coût total", C.eur(m["cost"].sum())),
+        ("ETP requis (pic)", f"{m['required_fte'].max():.1f}"),
+        ("Capacité (pic)", f"{m['effective_capacity'].max():.1f}"),
+        ("Buckets sous-staffés", f"{100 * m['understaffed'].mean():.0f} %"),
+        ("Occupation réelle (méd.)", f"{m.query('effective_capacity>0')['real_occupancy'].replace(np.inf, np.nan).median():.0%}"),
+    ])
+
+    # --- F1 heatmap ----------------------------------------------------------
+    st.subheader("Heatmap de couverture")
+    metric = st.selectbox("Métrique", ["coverage_ratio", "gap_fte", "real_occupancy"],
+                          format_func=lambda x: {"coverage_ratio": "Taux de couverture",
+                                                 "gap_fte": "Écart d'ETP", "real_occupancy": "Occupation réelle"}[x])
+    hourly = st.checkbox("Agréger à l'heure (plus lisible)", value=True)
+    match_filtered = matching[(matching["level"] == level)]
+    if sel_groups:
+        match_filtered = match_filtered[match_filtered["group_id"].isin(sel_groups)]
+    piv = reporting.heatmap_pivot(match_filtered, level, metric, BUSINESS_TZ)
+    piv = piv[[c for c in piv.columns if day_sel[0] <= c <= day_sel[1]]]
+    if hourly:
+        piv.index = [t[:2] + "h" for t in piv.index]
+        piv = piv.groupby(level=0).mean()
+        piv = piv.reindex(sorted(piv.index))
+    z = piv.clip(0, 3) if metric == "coverage_ratio" else (piv.clip(0, 2) if metric == "real_occupancy" else piv)
+    mid = {"coverage_ratio": 1.0, "gap_fte": 0.0, "real_occupancy": None}[metric]
+    fig = px.imshow(z.replace([np.inf, -np.inf], np.nan), aspect="auto",
+                    color_continuous_scale=DIV if metric != "real_occupancy" else "RdYlGn_r",
+                    color_continuous_midpoint=mid, labels=dict(x="Jour", y=f"Heure ({BUSINESS_TZ})", color=""))
+    fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, width="stretch")
+
+    # --- F2 requis vs capacité (granularité) ---------------------------------
+    st.subheader("ETP requis vs capacité disponible")
+    freq = {"15 min": "15min", "Heure": "h", "Jour": "D"}[gran]
+    ts = m.set_index("local")
+    agg = ts[["required_fte", "effective_capacity", "workload_hours"]].resample(freq).mean()
+    agg["charge_brute_fte"] = ts["workload_hours"].resample(freq).mean() / BUCKET_HOURS
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=agg.index, y=agg["effective_capacity"], name="Capacité", fill="tozeroy",
+                              line=dict(color="#9ecae1")))
+    fig2.add_trace(go.Scatter(x=agg.index, y=agg["required_fte"], name="ETP requis (Erlang C)",
+                              line=dict(color="#d7301f", width=2)))
+    fig2.add_trace(go.Scatter(x=agg.index, y=agg["charge_brute_fte"], name="Charge brute (occ. 100%)",
+                              line=dict(color="#fdae61", width=1, dash="dot")))
+    fig2.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", y=1.12),
+                       yaxis_title="ETP")
+    st.plotly_chart(fig2, width="stretch")
+    st.caption("L'écart entre la charge brute (occ. 100 %) et l'ETP requis = **marge de sécurité Erlang C** "
+               "(agents en plus pour tenir le SLA).")
+
+    # --- FTE par équipe / jour (bâton divisé) + coût/jour --------------------
+    sup_t = _local(supply_team[supply_team["level"] == level])
+    if sel_groups:
+        sup_t = sup_t[sup_t["group_id"].isin(sel_groups)]
+    sup_t = sup_t[(sup_t["date"] >= day_sel[0]) & (sup_t["date"] <= day_sel[1])]
+    if dregions or dsupply or dtasks:
+        st.caption("ℹ️ Les filtres région/supply/tâche s'appliquent à la **demande** (graphes ci-dessous).")
+    c5, c6 = st.columns(2)
+    with c5:
+        st.subheader("Agents-heures par équipe et par jour")
+        per = sup_t.groupby(["date", "team_id"])["agents"].sum().reset_index()
+        per["agent_h"] = per["agents"] * BUCKET_HOURS
+        fig3 = px.bar(per, x="date", y="agent_h", color="team_id")
+        fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), legend_title="", yaxis_title="Agents·h")
+        st.plotly_chart(fig3, width="stretch")
+    with c6:
+        st.subheader("Coût par jour")
+        cpd = sup_t.groupby("date")["cost"].sum().reset_index()
+        fig4 = px.bar(cpd, x="date", y="cost", color_discrete_sequence=["#2c7fb8"])
+        fig4.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="Coût (€)")
+        st.plotly_chart(fig4, width="stretch")
+
+    # --- demande filtrée (contribution) --------------------------------------
+    dd = demand[demand["level"] == level].copy()
+    if sel_groups:
+        dd = dd[dd["group_id"].isin(sel_groups)]
+    if dregions:
+        dd = dd[dd["region_id"].isin(dregions)]
+    if dsupply:
+        dd = dd[dd["supply_id"].isin(dsupply)]
+    if dtasks:
+        dd = dd[dd["task_type_id"].isin(dtasks)]
+    st.subheader("Contribution à la charge (demande filtrée)")
+    contrib = dd.groupby(["region_id", "supply_id", "task_type_id"])["workload_hours"].sum().reset_index()
+    fig5 = px.bar(contrib.sort_values("workload_hours"), x="workload_hours", y="region_id", color="task_type_id",
+                  orientation="h", hover_data=["supply_id"])
+    fig5.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Heures de charge", legend_title="")
+    st.plotly_chart(fig5, width="stretch")
+
+    # --- F3 trous ------------------------------------------------------------
+    st.subheader("Trous de couverture prioritaires")
+    gaps = reporting.gap_intervals(match_filtered, top=15)
+    if gaps.empty:
+        st.success("Aucun trou de couverture sur ce level.")
+    else:
+        g = gaps.copy()
+        g["début"] = g["start_utc"].dt.tz_convert(BUSINESS_TZ).dt.strftime("%a %d/%m %H:%M")
+        g["fin"] = g["end_utc"].dt.tz_convert(BUSINESS_TZ).dt.strftime("%a %d/%m %H:%M")
+        st.dataframe(g[["début", "fin", "duration_h", "max_deficit_fte", "total_deficit_fte_hours"]]
+                     .rename(columns={"duration_h": "durée (h)", "max_deficit_fte": "déficit max",
+                                      "total_deficit_fte_hours": "déficit cumulé (ETP·h)"}),
+                     width="stretch", hide_index=True)
+
+    # --- édition de l'allocation ---------------------------------------------
+    st.subheader("✏️ Répartition d'agents (éditable)")
+    st.caption("Ajustez le nb d'agents par équipe et par créneau (UTC) pour un jour de semaine. "
+               "« Enregistrer » recalcule la couverture sans relancer l'optimiseur.")
+    dow = st.selectbox("Jour de semaine", list(range(7)),
+                       format_func=lambda d: ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][d])
+    alloc = C.table("allocation")
+    teams_lvl = C.table("team")
+    teams_lvl = teams_lvl[teams_lvl["level"] == level]["team_id"].tolist()
+    sub = alloc[(alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl))]
+    grid = (sub.pivot_table(index="slot_utc", columns="team_id", values="agents", fill_value=0)
+            .reindex(range(96), fill_value=0).reindex(columns=teams_lvl, fill_value=0).reset_index())
+    grid["UTC"] = grid["slot_utc"].map(lambda s: f"{s * 15 // 60:02d}:{s * 15 % 60:02d}")
+    grid = grid[["UTC"] + teams_lvl]
+    edited = st.data_editor(grid, width="stretch", hide_index=True, height=300, key=f"alloc_{dow}_{level}")
+    if st.button("💾 Enregistrer la répartition", type="primary"):
+        e = edited.copy()
+        e["slot_utc"] = range(96)
+        long = e.melt(id_vars="slot_utc", value_vars=teams_lvl, var_name="team_id", value_name="agents")
+        long = long[long["agents"] > 0]
+        long["dow"] = dow
+        keep = alloc[~((alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl)))]
+        C.save_table("allocation", pd.concat([keep, long[["dow", "slot_utc", "team_id", "agents"]]], ignore_index=True))
+        st.success("Répartition enregistrée.")
+        st.rerun()
+
+
+# =============================================================================
+# DEMANDE — Réel vs Forecast
 # =============================================================================
 def render_forecast():
     st.header("📊 Demande — Réel vs Forecast")
@@ -94,193 +610,16 @@ def render_forecast():
 
 
 # =============================================================================
-# 2) COUVERTURE & COÛTS
-# =============================================================================
-def _local(df):
-    df = df.copy()
-    df["local"] = df["bucket_utc"].dt.tz_convert(BUSINESS_TZ)
-    df["date"] = df["local"].dt.date
-    return df
-
-
-def render_coverage():
-    st.header("🗓️ Couverture & coûts")
-    month = C.month_selector()
-
-    with st.expander("⚙️ Optimiseur de répartition (coût minimal)", expanded=False):
-        st.markdown("Le bouton calcule, par **programmation linéaire**, la répartition d'agents la "
-                    "moins chère qui couvre l'ETP requis (Erlang C), **par jour de semaine**. "
-                    "Résultat éditable plus bas.")
-        cc = st.columns(3)
-        pct = cc[0].slider("Couvrir le percentile de demande", 0.5, 1.0, 1.0, 0.05,
-                           help="1.0 = couvre le pire jour du même jour de semaine.")
-        lens = cc[1].multiselect(
-            "Durées de shift (h)", [1, 2, 4, 6, 8], default=[6, 8],
-            help="Blocs autorisés. Des shifts courts collent mieux à la demande (coût plus bas) "
-                 "mais sont peu réalistes en exploitation.")
-        if cc[2].button("🚀 (Ré)optimiser", type="primary"):
-            lengths = tuple(int(h * 4) for h in (lens or [6, 8]))
-            with st.spinner("Optimisation…"):
-                C.run_optimizer(month, percentile=pct, shift_lengths=lengths)
-            st.success("Allocation optimisée.")
-            st.rerun()
-
-    cov = C.coverage(month, C.db_version())
-    matching, supply_team, demand = cov["matching"], cov["supply_team"], cov["demand"]
-    if supply_team.empty:
-        st.info("Aucune allocation pour ce mois. Ouvrez l'optimiseur ci-dessus et lancez « (Ré)optimiser ».")
-        return
-
-    # --- filtres -------------------------------------------------------------
-    f = st.columns(5)
-    level = f[0].selectbox("Level", sorted(matching["level"].unique()),
-                           format_func=lambda l: f"Level {l}")
-    dregions = f[1].multiselect("Région", sorted(demand["region_id"].unique()))
-    dsupply = f[2].multiselect("Supply", sorted(demand["supply_id"].unique()))
-    dtasks = f[3].multiselect("Type de tâche", sorted(demand["task_type_id"].unique()))
-    gran = f[4].radio("Granularité", ["15 min", "Heure", "Jour"], horizontal=False)
-
-    m = _local(matching[matching["level"] == level])
-    days = sorted(m["date"].unique())
-    day_sel = st.select_slider("Jours affichés", options=days,
-                               value=(days[0], days[-1]) if len(days) > 1 else (days[0], days[0]))
-    m = m[(m["date"] >= day_sel[0]) & (m["date"] <= day_sel[1])]
-
-    # KPI
-    C.kpi_row([
-        ("Coût total", C.eur(m["cost"].sum())),
-        ("ETP requis (pic)", f"{m['required_fte'].max():.1f}"),
-        ("Capacité (pic)", f"{m['effective_capacity'].max():.1f}"),
-        ("Buckets sous-staffés", f"{100 * m['understaffed'].mean():.0f} %"),
-        ("Occupation réelle (méd.)", f"{m.query('effective_capacity>0')['real_occupancy'].replace(np.inf, np.nan).median():.0%}"),
-    ])
-
-    # --- F1 heatmap ----------------------------------------------------------
-    st.subheader("Heatmap de couverture")
-    metric = st.selectbox("Métrique", ["coverage_ratio", "gap_fte", "real_occupancy"],
-                          format_func=lambda x: {"coverage_ratio": "Taux de couverture",
-                                                 "gap_fte": "Écart d'ETP", "real_occupancy": "Occupation réelle"}[x])
-    hourly = st.checkbox("Agréger à l'heure (plus lisible)", value=True)
-    piv = reporting.heatmap_pivot(matching[matching["level"] == level], level, metric, BUSINESS_TZ)
-    piv = piv[[c for c in piv.columns if day_sel[0] <= c <= day_sel[1]]]
-    if hourly:
-        piv.index = [t[:2] + "h" for t in piv.index]
-        piv = piv.groupby(level=0).mean()
-        piv = piv.reindex(sorted(piv.index))
-    z = piv.clip(0, 3) if metric == "coverage_ratio" else (piv.clip(0, 2) if metric == "real_occupancy" else piv)
-    mid = {"coverage_ratio": 1.0, "gap_fte": 0.0, "real_occupancy": None}[metric]
-    fig = px.imshow(z.replace([np.inf, -np.inf], np.nan), aspect="auto",
-                    color_continuous_scale=DIV if metric != "real_occupancy" else "RdYlGn_r",
-                    color_continuous_midpoint=mid, labels=dict(x="Jour", y=f"Heure ({BUSINESS_TZ})", color=""))
-    fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig, width="stretch")
-
-    # --- F2 requis vs capacité (granularité) ---------------------------------
-    st.subheader("ETP requis vs capacité disponible")
-    freq = {"15 min": "15min", "Heure": "h", "Jour": "D"}[gran]
-    ts = m.set_index("local")
-    agg = ts[["required_fte", "effective_capacity", "workload_hours"]].resample(freq).mean()
-    agg["charge_brute_fte"] = ts["workload_hours"].resample(freq).mean() / BUCKET_HOURS
-    fig2 = go.Figure()
-    fig2.add_trace(go.Scatter(x=agg.index, y=agg["effective_capacity"], name="Capacité", fill="tozeroy",
-                              line=dict(color="#9ecae1")))
-    fig2.add_trace(go.Scatter(x=agg.index, y=agg["required_fte"], name="ETP requis (Erlang C)",
-                              line=dict(color="#d7301f", width=2)))
-    fig2.add_trace(go.Scatter(x=agg.index, y=agg["charge_brute_fte"], name="Charge brute (occ. 100%)",
-                              line=dict(color="#fdae61", width=1, dash="dot")))
-    fig2.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", y=1.12),
-                       yaxis_title="ETP")
-    st.plotly_chart(fig2, width="stretch")
-    st.caption("L'écart entre la charge brute (occ. 100 %) et l'ETP requis = **marge de sécurité Erlang C** "
-               "(agents en plus pour tenir le SLA).")
-
-    # --- FTE par équipe / jour (bâton divisé) + coût/jour --------------------
-    sup_t = _local(supply_team[supply_team["level"] == level])
-    sup_t = sup_t[(sup_t["date"] >= day_sel[0]) & (sup_t["date"] <= day_sel[1])]
-    if dregions or dsupply or dtasks:
-        st.caption("ℹ️ Les filtres région/supply/tâche s'appliquent à la **demande** (graphes ci-dessous).")
-    c5, c6 = st.columns(2)
-    with c5:
-        st.subheader("Agents-heures par équipe et par jour")
-        per = sup_t.groupby(["date", "team_id"])["agents"].sum().reset_index()
-        per["agent_h"] = per["agents"] * BUCKET_HOURS
-        fig3 = px.bar(per, x="date", y="agent_h", color="team_id")
-        fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), legend_title="", yaxis_title="Agents·h")
-        st.plotly_chart(fig3, width="stretch")
-    with c6:
-        st.subheader("Coût par jour")
-        cpd = sup_t.groupby("date")["cost"].sum().reset_index()
-        fig4 = px.bar(cpd, x="date", y="cost", color_discrete_sequence=["#2c7fb8"])
-        fig4.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="Coût (€)")
-        st.plotly_chart(fig4, width="stretch")
-
-    # --- demande filtrée (contribution) --------------------------------------
-    dd = demand[demand["level"] == level].copy()
-    if dregions:
-        dd = dd[dd["region_id"].isin(dregions)]
-    if dsupply:
-        dd = dd[dd["supply_id"].isin(dsupply)]
-    if dtasks:
-        dd = dd[dd["task_type_id"].isin(dtasks)]
-    st.subheader("Contribution à la charge (demande filtrée)")
-    contrib = dd.groupby(["region_id", "supply_id", "task_type_id"])["workload_hours"].sum().reset_index()
-    fig5 = px.bar(contrib.sort_values("workload_hours"), x="workload_hours", y="region_id", color="task_type_id",
-                  orientation="h", hover_data=["supply_id"])
-    fig5.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Heures de charge", legend_title="")
-    st.plotly_chart(fig5, width="stretch")
-
-    # --- F3 trous ------------------------------------------------------------
-    st.subheader("Trous de couverture prioritaires")
-    gaps = reporting.gap_intervals(matching[matching["level"] == level], top=15)
-    if gaps.empty:
-        st.success("Aucun trou de couverture sur ce level.")
-    else:
-        g = gaps.copy()
-        g["début"] = g["start_utc"].dt.tz_convert(BUSINESS_TZ).dt.strftime("%a %d/%m %H:%M")
-        g["fin"] = g["end_utc"].dt.tz_convert(BUSINESS_TZ).dt.strftime("%a %d/%m %H:%M")
-        st.dataframe(g[["début", "fin", "duration_h", "max_deficit_fte", "total_deficit_fte_hours"]]
-                     .rename(columns={"duration_h": "durée (h)", "max_deficit_fte": "déficit max",
-                                      "total_deficit_fte_hours": "déficit cumulé (ETP·h)"}),
-                     width="stretch", hide_index=True)
-
-    # --- édition de l'allocation ---------------------------------------------
-    st.subheader("✏️ Répartition d'agents (éditable)")
-    st.caption("Ajustez le nb d'agents par équipe et par créneau (UTC) pour un jour de semaine. "
-               "« Enregistrer » recalcule la couverture sans relancer l'optimiseur.")
-    dow = st.selectbox("Jour de semaine", list(range(7)),
-                       format_func=lambda d: ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][d])
-    alloc = C.table("allocation")
-    teams_lvl = C.table("team")
-    teams_lvl = teams_lvl[teams_lvl["level"] == level]["team_id"].tolist()
-    sub = alloc[(alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl))]
-    grid = (sub.pivot_table(index="slot_utc", columns="team_id", values="agents", fill_value=0)
-            .reindex(range(96), fill_value=0).reindex(columns=teams_lvl, fill_value=0).reset_index())
-    grid["UTC"] = grid["slot_utc"].map(lambda s: f"{s * 15 // 60:02d}:{s * 15 % 60:02d}")
-    grid = grid[["UTC"] + teams_lvl]
-    edited = st.data_editor(grid, width="stretch", hide_index=True, height=300, key=f"alloc_{dow}_{level}")
-    if st.button("💾 Enregistrer la répartition", type="primary"):
-        e = edited.copy()
-        e["slot_utc"] = range(96)
-        long = e.melt(id_vars="slot_utc", value_vars=teams_lvl, var_name="team_id", value_name="agents")
-        long = long[long["agents"] > 0]
-        long["dow"] = dow
-        keep = alloc[~((alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl)))]
-        C.save_table("allocation", pd.concat([keep, long[["dow", "slot_utc", "team_id", "agents"]]], ignore_index=True))
-        st.success("Répartition enregistrée.")
-        st.rerun()
-
-
-# =============================================================================
-# 3) EXPLORATEUR DE DONNÉES (type BI)
+# EXPLORATEUR DE DONNÉES (type BI)
 # =============================================================================
 COMPUTED = {
     "demand": ("Demande forecast (bucket)", ["bucket_utc", "level", "task_type_id", "group_id", "region_id", "supply_id"],
                ["contacts", "workload_hours"]),
-    "required": ("ETP requis Erlang C (bucket×level)", ["bucket_utc", "level"],
+    "required": ("ETP requis Erlang C (bucket×level×groupe)", ["bucket_utc", "level", "group_id"],
                  ["contacts", "workload_hours", "agents_online", "required_fte", "aht_eff"]),
-    "coverage": ("Couverture (bucket×level)", ["bucket_utc", "level"],
+    "coverage": ("Couverture (bucket×level×groupe)", ["bucket_utc", "level", "group_id"],
                  ["required_fte", "effective_capacity", "agents", "gap_fte", "cost", "coverage_ratio", "real_occupancy"]),
-    "supply_team": ("Capacité par équipe (bucket)", ["bucket_utc", "team_id", "level"],
+    "supply_team": ("Capacité par équipe (bucket)", ["bucket_utc", "team_id", "group_id", "level"],
                     ["agents", "effective_capacity", "cost"]),
     "actuals": ("Réel vs forecast (mois)", ["month", "region_id", "supply_id", "group_id", "task_type_id"],
                 ["pax_real", "pax_forecast", "tasks_real", "tasks_forecast", "cr_real", "cr_forecast"]),
@@ -342,8 +681,10 @@ def render_explorer():
     tab_pivot, tab_raw = st.tabs(["Pivot", "Données brutes"])
     with tab_pivot:
         if rows:
+            # Fix: use fill_value=0 only for numeric columns, else fill_value=""
+            fill_val = 0 if pd.api.types.is_numeric_dtype(df[val]) else ""
             piv = pd.pivot_table(df, index=rows, columns=None if cols == "(aucune)" else cols,
-                                 values=val, aggfunc=aggf, fill_value=0)
+                                 values=val, aggfunc=aggf, fill_value=fill_val)
             st.dataframe(piv, width="stretch")
             st.download_button("⬇️ Télécharger (CSV)", piv.to_csv().encode(), f"{name}_pivot.csv")
         else:
@@ -354,27 +695,35 @@ def render_explorer():
 
 
 # =============================================================================
-# 4) ÉDITION DES RÉFÉRENTIELS
+# ÉDITION DES RÉFÉRENTIELS
 # =============================================================================
 def _group_map_editor():
     """Pivot éditable du mapping group : combos (Region×Supply) × mois, actif/inactif."""
     gm = C.table("group_map")
+    grp = C.table("group")
+    all_groups = sorted(grp["group_id"].tolist()) if not grp.empty else sorted(gm["group_id"].unique())
     cols_order = list(gm.columns)
     months = sorted(gm["month"].unique())
-    piv = (gm.pivot_table(index=["group_id", "region_id", "supply_id"], columns="month",
+    piv = (gm.pivot_table(index=["region_id", "supply_id"], columns="month",
                           values="active", fill_value=0)
            .reindex(columns=months, fill_value=0).reset_index())
+    # add group_id column (pick from current data — one group per region×supply)
+    group_by_rs = gm.drop_duplicates(["region_id", "supply_id"]).set_index(["region_id", "supply_id"])["group_id"].to_dict()
+    piv["group_id"] = piv.apply(lambda r: group_by_rs.get((r["region_id"], r["supply_id"]), ""), axis=1)
+    # reorder columns: region_id, supply_id, group_id, then months
+    piv = piv[["region_id", "supply_id", "group_id"] + months]
     for m in months:
         piv[m] = piv[m].astype(bool)
-    st.caption("Cochez les mois où chaque **group** (Region×Supply) est actif. "
-               "Vous pouvez ajouter une ligne (renseignez group_id / region_id / supply_id).")
+    st.caption("Cochez les mois où chaque **(Region×Supply)** est actif et renseignez le **groupe** associé.")
     colcfg = {m: st.column_config.CheckboxColumn(m[2:]) for m in months}
-    colcfg |= {c: st.column_config.TextColumn(c) for c in ["group_id", "region_id", "supply_id"]}
+    colcfg["group_id"] = st.column_config.SelectboxColumn("Groupe", options=all_groups)
+    colcfg["region_id"] = st.column_config.TextColumn("Région")
+    colcfg["supply_id"] = st.column_config.TextColumn("Supply")
     edited = st.data_editor(piv, width="stretch", hide_index=True, num_rows="dynamic",
                             column_config=colcfg, key="gm_pivot")
     if st.button("💾 Enregistrer le mapping group", type="primary"):
-        e = edited.dropna(subset=["group_id", "region_id", "supply_id"])
-        long = e.melt(id_vars=["group_id", "region_id", "supply_id"], value_vars=months,
+        e = edited.dropna(subset=["region_id", "supply_id"])
+        long = e.melt(id_vars=["region_id", "supply_id", "group_id"], value_vars=months,
                       var_name="month", value_name="active")
         long["active"] = long["active"].fillna(False).astype(int)
         C.save_table("group_map", long[cols_order])
@@ -436,6 +785,37 @@ def render_editor():
         st.info(spec.note)
     if name == "group_map":
         _group_map_editor()
+        return
+    if name == "group":
+        st.subheader("Groupes commerciaux")
+        df = C.table("group")
+        edited = st.data_editor(df, width="stretch", hide_index=True, num_rows="dynamic",
+                                key="ed_group",
+                                column_config={
+                                    "group_id": st.column_config.TextColumn("ID groupe (clé)"),
+                                    "group_label": st.column_config.TextColumn("Libellé"),
+                                })
+        if st.button("💾 Enregistrer les groupes", type="primary"):
+            C.save_table("group", edited)
+            st.success("Table « Groupes commerciaux » enregistrée.")
+            st.rerun()
+        return
+    if name == "team_group":
+        st.subheader("Affectation équipes → groupes")
+        teams = C.table("team")[["team_id", "team_label", "level"]]
+        groups = C.table("group")["group_id"].tolist() if not C.table("group").empty else []
+        df = C.table("team_group")
+        edited = st.data_editor(df, width="stretch", hide_index=True, num_rows="dynamic",
+                                key="ed_team_group",
+                                column_config={
+                                    "team_id": st.column_config.SelectboxColumn("Équipe",
+                                                                                options=teams["team_id"].tolist()),
+                                    "group_id": st.column_config.SelectboxColumn("Groupe", options=groups),
+                                })
+        if st.button("💾 Enregistrer l'affectation équipes→groupes", type="primary"):
+            C.save_table("team_group", edited)
+            st.success("Table « Affectation équipes → groupes » enregistrée.")
+            st.rerun()
         return
     df = C.table(name)
     edited = st.data_editor(df, width="stretch", hide_index=True, num_rows="dynamic", key=f"ed_{name}")

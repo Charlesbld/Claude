@@ -71,9 +71,10 @@ def demand(month: str, _v: float) -> pd.DataFrame:
     return model.build_forecast_demand(month)
 
 
-@st.cache_data(show_spinner="Dimensionnement Erlang C…")
+@st.cache_data(show_spinner="Dimensionnement Erlang C par groupe…")
 def required(month: str, _v: float) -> pd.DataFrame:
-    return model.required_by_level(demand(month, _v))
+    from staffing.model import required_by_group
+    return required_by_group(demand(month, _v))
 
 
 @st.cache_data(show_spinner="Calcul de la couverture…")

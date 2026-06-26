@@ -46,6 +46,9 @@ TABLES: dict[str, TableSpec] = {
     "task_type": _t("task_type", "Types de tâche (A5)", ["task_type_id"],
                     ["task_type_id", "task_type_label", "level"], [], editable=True,
                     note="level 1 = externe, level 2 = interne (escalades)."),
+    "group": _t("group", "Groupes commerciaux (A7)", ["group_id"],
+                ["group_id", "group_label"], [], editable=True, group="Référentiels",
+                note="Groupes de monétisation (ex. DIRECT_AIR, OTA, RAIL). Renommez le libellé librement."),
     "group_map": _t("group_map", "Mapping Group = Supply×Region par mois (A4)",
                     ["month", "region_id", "supply_id"],
                     ["month", "region_id", "supply_id", "group_id"], ["active"],
@@ -83,6 +86,10 @@ TABLES: dict[str, TableSpec] = {
                             ["team_id", "dow", "start_local", "end_local"], [],
                             editable=True, group="Offre",
                             note="Fenêtres où une équipe PEUT travailler (heure locale). L'optimiseur place les agents dedans."),
+    "team_group": _t("team_group", "Affectation équipes → groupes (A8)", ["team_id", "group_id"],
+                     ["team_id", "group_id"], [], editable=True, group="Offre",
+                     note="Chaque équipe se spécialise sur un ou plusieurs groupes commerciaux. "
+                          "Une ligne = l'équipe peut traiter les contacts de ce groupe."),
     "profile_dow": _t("profile_dow", "Profil jour de semaine (mensuel→jour)", ["dow"],
                       ["dow"], ["weight"], editable=True, group="Profils",
                       note="Poids relatif des contacts par jour de semaine (remplace départ×lag)."),
@@ -102,7 +109,7 @@ EDITABLE = [n for n, s in TABLES.items() if s.editable]
 TEXT_COLUMNS = {
     "month", "region_id", "supply_id", "task_type_id", "team_id", "group_id",
     "country_code", "timezone", "sourcing", "region_label", "supply_label",
-    "task_type_label", "team_label", "start_local", "end_local",
+    "task_type_label", "team_label", "group_label", "start_local", "end_local",
 }
 
 
@@ -136,7 +143,7 @@ def list_tables(db_path: Path | str = DB_PATH) -> list[str]:
 
 def read_table(name: str, db_path: Path | str = DB_PATH) -> pd.DataFrame:
     with connect(db_path) as con:
-        df = pd.read_sql(f"SELECT * FROM {name}", con)
+        df = pd.read_sql(f'SELECT * FROM "{name}"', con)
     return coerce_types(name, df)  # répare une base où un nombre serait stocké en TEXT
 
 

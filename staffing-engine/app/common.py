@@ -10,7 +10,7 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from staffing import db, model, optimizer, reporting  # noqa: E402
+from staffing import db, ingest, model, optimizer, reporting  # noqa: E402
 from staffing.timespine import BUSINESS_TZ  # noqa: E402
 
 DB_PATH = db.DB_PATH
@@ -21,6 +21,13 @@ def ensure_db():
     if not db.db_exists():
         import subprocess
         subprocess.run([sys.executable, str(ROOT / "scripts" / "seed_db.py")], cwd=str(ROOT), check=True)
+        # Sur Cloud, le disque est éphémère : à chaque redéploiement on réamorce la
+        # base puis on ré-ingère les CSV déposés dans data/incoming/ (workflow mensuel).
+        try:
+            for r in ingest.ingest_dir():
+                print(f"[ingest] {r['file']} → {r['table']} ({r['total_after']} lignes)")
+        except Exception as exc:  # ne jamais bloquer le démarrage de l'app
+            st.warning(f"Ingestion de data/incoming/ ignorée : {exc}")
 
 
 def db_version() -> float:
@@ -41,6 +48,21 @@ def table(name: str) -> pd.DataFrame:
 def save_table(name: str, df: pd.DataFrame):
     db.write_table(name, df)
     st.cache_data.clear()
+
+
+# --- ingestion CSV (workflow mensuel) ----------------------------------------
+def ingest_incoming() -> list[dict]:
+    """Ré-ingère tous les fichiers de data/incoming/ et invalide le cache."""
+    reports = ingest.ingest_dir()
+    st.cache_data.clear()
+    return reports
+
+
+def ingest_upload(table: str, buffer, label: str = "") -> dict:
+    """Ingère un CSV uploadé dans la table choisie et invalide le cache."""
+    rep = ingest.ingest_buffer(table, buffer, label=label)
+    st.cache_data.clear()
+    return rep
 
 
 # --- calculs (cachés sur le mois + version base) -----------------------------

@@ -382,11 +382,53 @@ def _group_map_editor():
         st.rerun()
 
 
+def _import_section():
+    """Import mensuel par fichier CSV (upsert par clé) + ré-ingestion du dossier."""
+    from staffing import ingest
+    st.caption("Workflow mensuel : préparez un CSV par table (depuis le **modèle** ci-dessous), "
+               "puis **uploadez-le** ici ou déposez-le dans `data/incoming/` et poussez sur GitHub. "
+               "L'import **remplace les lignes du même mois** et conserve le reste (upsert par clé).")
+    monthly = ["pax_real", "tasks_real", "pax_forecast", "contact_rate_forecast", "group_map"]
+    tbl = st.selectbox("Table cible", monthly + [n for n in db.EDITABLE if n not in monthly],
+                       format_func=lambda n: db.TABLES[n].label, key="imp_tbl")
+    keys = db.TABLES[tbl].keys
+    st.caption(f"Clé d'upsert : **{' × '.join(keys)}** — colonnes attendues : "
+               f"`{', '.join(ingest.expected_columns(db.TABLES[tbl]))}`")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.download_button("⬇️ Modèle CSV (données actuelles)",
+                           C.table(tbl).to_csv(index=False).encode(),
+                           f"{tbl}.csv", key="imp_tmpl")
+    with c2:
+        up = st.file_uploader(f"Uploader un CSV pour « {db.TABLES[tbl].label} »", type="csv", key="imp_up")
+        if up is not None and st.button("📥 Importer ce fichier", type="primary", key="imp_btn"):
+            try:
+                r = C.ingest_upload(tbl, up, label=up.name)
+                st.success(f"Importé : {r['rows_in']} lignes (remplacées {r['rows_replaced']}, "
+                           f"total {r['total_after']}).")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Échec de l'import : {exc}")
+    st.divider()
+    if st.button("🔄 Ré-ingérer tout le dossier data/incoming/", key="imp_dir"):
+        reports = C.ingest_incoming()
+        if not reports:
+            st.info("Aucun fichier .csv dans data/incoming/.")
+        else:
+            st.success("Ingestion terminée :")
+            st.dataframe(pd.DataFrame(reports), width="stretch", hide_index=True)
+            st.rerun()
+
+
 def render_editor():
     st.header("✏️ Éditer les données")
     st.markdown("Modifiez directement les tables d'entrée. **« Enregistrer »** écrit en base SQLite "
                 "et recalcule tout. (Les PAX/tâches sont aussi modifiables ici ; voir la page Réel vs Forecast "
                 "pour le contact rate par région×supply.)")
+
+    with st.expander("📥 Importer des fichiers (workflow mensuel)", expanded=False):
+        _import_section()
+
     name = st.selectbox("Table à éditer", db.EDITABLE,
                         format_func=lambda n: db.TABLES[n].label)
     spec = db.TABLES[name]

@@ -22,9 +22,10 @@ cd staffing-engine
 pip install -r requirements.txt
 
 python scripts/seed_db.py        # amorce data/staffing.db (données synthétiques 2026)
+python scripts/ingest.py         # (option) ingère les CSV déposés dans data/incoming/
 streamlit run app/app.py         # application (amorce la base si besoin)
 
-pytest -q                        # validation des calculs (9 tests)
+pytest -q                        # validation des calculs (15 tests)
 ```
 
 L'application comporte 5 pages :
@@ -35,7 +36,31 @@ L'application comporte 5 pages :
 | **Réel vs Forecast** | Compare PAX/tâches réels au forecast, **décompose l'écart** (effet PAX vs effet contact rate), **édite le contact rate** par région×supply×task |
 | **Couverture & coûts** | Erlang C, **bouton optimiseur**, heatmap, ETP requis vs capacité (15 min / heure / jour), agents-h par équipe, coût/jour, trous, **répartition éditable** |
 | **Explorateur** | Pivots type BI sur **toutes** les tables (entrée + calculées) |
-| **Éditer les données** | Modification directe des tables d'entrée (écriture SQLite) |
+| **Éditer les données** | Modification directe des tables + **import mensuel par CSV** (upsert) |
+
+---
+
+## Workflow mensuel — pousser de nouvelles données par CSV
+
+Plutôt que d'éditer le fichier binaire `staffing.db`, on **dépose des CSV** (un par
+table) et le moteur les **ingère** par *upsert* (les lignes du même mois sont
+remplacées, le reste conservé — idempotent et cumulatif).
+
+```
+data/templates/   modèles réalistes (un par table, format prêt à éditer)
+data/incoming/    on y dépose les CSV mensuels  →  ingérés dans la base
+```
+
+1. Partez d'un **modèle** : `data/templates/` ou bouton « Modèle CSV » dans l'app.
+2. Nommez le fichier d'après sa **table cible** (`pax_real.csv`, ou
+   `pax_real__2026-07.csv` — ce qui suit `__` est un libellé libre).
+3. Posez-le dans `data/incoming/`, puis :
+   - **en local** : `python scripts/ingest.py` (ou *Éditer → 📥 Importer* dans l'app) ;
+   - **sur GitHub / Streamlit Cloud** : poussez le fichier ; au redéploiement la base
+     est réamorcée puis `data/incoming/` est ingéré **automatiquement**.
+
+Tables typiquement mensuelles : `pax_forecast`, `pax_real`, `tasks_real`,
+`contact_rate_forecast`, `group_map`. Détails : [`data/incoming/README.md`](data/incoming/README.md).
 
 ---
 
@@ -100,16 +125,20 @@ Le registre `db.TABLES` décrit dimensions/mesures/notes de chaque table et pilo
 staffing/
   timespine.py   time spine UTC 15 min, fuseaux (A1)
   db.py          couche SQLite + registre des tables
+  ingest.py      ingestion CSV mensuelle (upsert par clé)
   model.py       demande forecast → buckets + table réel vs forecast (C)
   erlang.py      dimensionnement Erlang C
   optimizer.py   optimiseur IP (répartition) + couverture (D'/E)
   reporting.py   heatmap, trous, synthèses (F)
 app/
   app.py         entrée multipage (thème clair + navigation)
-  common.py      cache / chargement / helpers
+  common.py      cache / chargement / helpers + ingestion
   pages_app.py   les 4 pages métier
 scripts/seed_db.py   amorçage des données synthétiques
-tests/test_v2.py     validation (Erlang C, conservation, optimiseur, décomposition)
+scripts/ingest.py    ingestion des CSV de data/incoming/
+data/templates/      modèles CSV (un par table mensuelle)
+data/incoming/       dépôt des CSV mensuels (ingérés dans la base)
+tests/test_v2.py     validation (Erlang C, conservation, optimiseur, décomposition, ingestion)
 ```
 
 ---

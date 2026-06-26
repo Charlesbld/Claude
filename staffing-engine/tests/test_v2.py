@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import seed_db  # noqa: E402
-from staffing import db, erlang, model, optimizer  # noqa: E402
+from staffing import db, erlang, ingest, model, optimizer  # noqa: E402
 
 MONTH = "2026-07"
 
@@ -107,3 +108,48 @@ def test_db_roundtrip(ctx):
     bumped.loc[0, "aht_seconds"] = 999
     db.write_table("param_aht", bumped, ctx.dbp)
     assert db.read_table("param_aht", ctx.dbp).loc[0, "aht_seconds"] == 999
+
+
+# --- ingestion CSV mensuelle -------------------------------------------------
+def test_ingest_upsert_is_additive_and_idempotent(ctx, tmp_path):
+    before = db.read_table("pax_forecast", ctx.dbp)
+    new = pd.DataFrame({"month": ["2030-01", "2030-01"], "region_id": ["FR", "ES"],
+                        "supply_id": ["AIR", "AIR"], "pax": [123456, 222222]})
+    f = tmp_path / "pax_forecast__2030-01.csv"
+    new.to_csv(f, index=False)
+
+    rep = ingest.ingest_file(f, ctx.dbp)
+    after = db.read_table("pax_forecast", ctx.dbp)
+    assert rep["table"] == "pax_forecast" and rep["rows_in"] == 2
+    assert len(after) == len(before) + 2  # deux nouveaux mois ajoutés
+    got = after.set_index(["month", "region_id", "supply_id"]).loc[("2030-01", "FR", "AIR"), "pax"]
+    assert int(got) == 123456
+
+    # réingérer le même fichier ne duplique pas (upsert par clé)
+    ingest.ingest_file(f, ctx.dbp)
+    assert len(db.read_table("pax_forecast", ctx.dbp)) == len(before) + 2
+
+    # une valeur corrigée pour la même clé remplace l'ancienne
+    corr = new.copy()
+    corr.loc[0, "pax"] = 999999
+    corr.to_csv(f, index=False)
+    ingest.ingest_file(f, ctx.dbp)
+    after2 = db.read_table("pax_forecast", ctx.dbp)
+    assert len(after2) == len(before) + 2
+    got2 = after2.set_index(["month", "region_id", "supply_id"]).loc[("2030-01", "FR", "AIR"), "pax"]
+    assert int(got2) == 999999
+
+
+def test_ingest_rejects_missing_columns(ctx, tmp_path):
+    bad = pd.DataFrame({"month": ["2030-01"], "region_id": ["FR"], "pax": [10]})  # supply_id manquant
+    f = tmp_path / "pax_forecast__bad.csv"
+    bad.to_csv(f, index=False)
+    with pytest.raises(ValueError, match="Colonnes manquantes"):
+        ingest.ingest_file(f, ctx.dbp)
+
+
+def test_ingest_unknown_table(ctx, tmp_path):
+    f = tmp_path / "inexistante__x.csv"
+    pd.DataFrame({"a": [1]}).to_csv(f, index=False)
+    with pytest.raises(ValueError, match="Table inconnue"):
+        ingest.ingest_file(f, ctx.dbp)

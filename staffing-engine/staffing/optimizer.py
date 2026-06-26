@@ -190,10 +190,10 @@ def build_coverage(month: str, db_path=db.DB_PATH) -> dict:
         m[c] = m[c].fillna(0.0)
     m["gap_fte"] = m["effective_capacity"] - m["required_fte"]
     m["understaffed"] = m["gap_fte"] < -1e-9
-    req = m["required_fte"].to_numpy(); capv = m["effective_capacity"].to_numpy()
+    req = m["required_fte"].to_numpy(dtype=float); capv = m["effective_capacity"].to_numpy(dtype=float)
     m["coverage_ratio"] = np.divide(capv, req, out=np.full_like(capv, np.nan), where=req > 1e-9)
-    avail_prod = capv * BUCKET_HOURS * (1.0 - m["shrinkage"].to_numpy())
-    wl = m["workload_hours"].to_numpy()
+    avail_prod = capv * BUCKET_HOURS * (1.0 - m["shrinkage"].to_numpy(dtype=float))
+    wl = m["workload_hours"].to_numpy(dtype=float)
     occ = np.divide(wl, avail_prod, out=np.zeros_like(wl), where=avail_prod > 1e-9)
     occ = np.where((avail_prod <= 1e-9) & (wl > 1e-9), np.inf, occ)
     m["real_occupancy"] = occ

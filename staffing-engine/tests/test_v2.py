@@ -153,3 +153,25 @@ def test_ingest_unknown_table(ctx, tmp_path):
     pd.DataFrame({"a": [1]}).to_csv(f, index=False)
     with pytest.raises(ValueError, match="Table inconnue"):
         ingest.ingest_file(f, ctx.dbp)
+
+
+# --- robustesse des types : un nombre stocké en TEXT ne casse pas le calcul ---
+def test_read_table_coerces_text_numbers(ctx, tmp_path):
+    import shutil
+    import sqlite3
+    dbp = tmp_path / "corrupt.db"
+    shutil.copy(ctx.dbp, dbp)
+    # simule une édition app qui stocke des nombres en TEXT (dtype object)
+    for tbl, col in [("param_aht", "aht_seconds"), ("contact_rate_forecast", "contact_rate"),
+                     ("pax_forecast", "pax"), ("service_params", "shrinkage")]:
+        d = db.read_table(tbl, dbp)
+        d[col] = d[col].astype(str)
+        with sqlite3.connect(dbp) as con:
+            d.to_sql(tbl, con, if_exists="replace", index=False)
+    # read_table recoerce automatiquement en numérique
+    assert pd.api.types.is_numeric_dtype(db.read_table("param_aht", dbp)["aht_seconds"])
+    assert pd.api.types.is_numeric_dtype(db.read_table("service_params", dbp)["shrinkage"])
+    # et la couverture se calcule sans planter (np.divide sur object)
+    cov = optimizer.build_coverage(MONTH, dbp)
+    assert len(cov["matching"]) > 0
+    assert pd.api.types.is_float_dtype(cov["matching"]["real_occupancy"])

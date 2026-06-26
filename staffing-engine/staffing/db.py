@@ -97,6 +97,31 @@ TABLES: dict[str, TableSpec] = {
 
 EDITABLE = [n for n, s in TABLES.items() if s.editable]
 
+# Colonnes conservées en texte ; toute autre colonne connue (mesures + dims
+# comme dow/slot/level/active) est forcée en numérique.
+TEXT_COLUMNS = {
+    "month", "region_id", "supply_id", "task_type_id", "team_id", "group_id",
+    "country_code", "timezone", "sourcing", "region_label", "supply_label",
+    "task_type_label", "team_label", "start_local", "end_local",
+}
+
+
+def coerce_types(name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Force le type numérique sur les colonnes mesures/dims numériques d'une table connue.
+
+    Évite qu'une édition dans l'app ou un import stocke un nombre en TEXT (dtype
+    object), ce qui ferait planter les calculs en aval (ex. np.divide sur object).
+    Sans effet sur une table inconnue du registre.
+    """
+    spec = TABLES.get(name)
+    if spec is None:
+        return df
+    numeric = {*spec.measures, *(c for c in spec.dims if c not in TEXT_COLUMNS)}
+    out = df.copy()
+    for c in numeric & set(out.columns):
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    return out
+
 
 def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -111,13 +136,14 @@ def list_tables(db_path: Path | str = DB_PATH) -> list[str]:
 
 def read_table(name: str, db_path: Path | str = DB_PATH) -> pd.DataFrame:
     with connect(db_path) as con:
-        return pd.read_sql(f"SELECT * FROM {name}", con)
+        df = pd.read_sql(f"SELECT * FROM {name}", con)
+    return coerce_types(name, df)  # répare une base où un nombre serait stocké en TEXT
 
 
 def write_table(name: str, df: pd.DataFrame, db_path: Path | str = DB_PATH) -> None:
-    """Remplace intégralement une table."""
+    """Remplace intégralement une table (en normalisant les types numériques)."""
     with connect(db_path) as con:
-        df.to_sql(name, con, if_exists="replace", index=False)
+        coerce_types(name, df).to_sql(name, con, if_exists="replace", index=False)
 
 
 def seed(tables: dict[str, pd.DataFrame], db_path: Path | str = DB_PATH) -> None:

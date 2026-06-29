@@ -774,13 +774,14 @@ def render_explorer():
     p = st.columns(4)
     rows = p[0].multiselect("Lignes", dims, default=dims[:1])
     cols = p[1].selectbox("Colonnes", ["(aucune)"] + dims, index=0)
-    val = p[2].selectbox("Valeur", measures)
+    val = p[2].selectbox("Valeur", measures) if measures else None
     aggf = p[3].selectbox("Agrégation", ["sum", "mean", "max", "min", "count"])
 
     tab_pivot, tab_raw = st.tabs(["Pivot", "Données brutes"])
     with tab_pivot:
-        if rows:
-            # Fix: use fill_value=0 only for numeric columns, else fill_value=""
+        if not measures or val is None:
+            st.info("Aucune mesure disponible pour cette table.")
+        elif rows:
             fill_val = 0 if pd.api.types.is_numeric_dtype(df[val]) else ""
             piv = pd.pivot_table(df, index=rows, columns=None if cols == "(aucune)" else cols,
                                  values=val, aggfunc=aggf, fill_value=fill_val)

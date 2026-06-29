@@ -397,12 +397,14 @@ def _group_map_editor_inline():
                             num_rows="fixed", width="stretch", key="ed_gmap_ref")
     if st.button("💾 Enregistrer le mapping Groupe", type="primary", key="save_gmap_ref"):
         rows = []
-        for r in edited.itertuples(index=False):
-            gid = r.group_id
+        # iterrows() instead of itertuples(): month names like "2026-01" are not
+        # valid Python identifiers so itertuples() renames them to _N, breaking getattr.
+        for _, r in edited.iterrows():
+            gid = r["group_id"]
             for m in months_list:
-                rows.append({"month": m, "region_id": r.region_id,
-                             "supply_id": r.supply_id, "group_id": gid,
-                             "active": int(bool(getattr(r, m)))})
+                rows.append({"month": m, "region_id": r["region_id"],
+                             "supply_id": r["supply_id"], "group_id": gid,
+                             "active": int(bool(r[m]))})
         C.save_table("group_map", pd.DataFrame(rows))
         st.success("Mapping Groupe enregistré.")
         st.rerun()
@@ -477,12 +479,13 @@ def render_ref_groups():
 
         # Chart: nombre d'équipes par groupe et level
         count = tg_merged.groupby(["group_id", "level"]).size().reset_index(name="nb_équipes")
-        count["Level"] = "L" + count["level"].astype(str)
+        count["Level"] = "L" + count["level"].astype(int).astype(str)
         fig = px.bar(count, x="group_id", y="nb_équipes", color="Level",
                      barmode="stack",
                      labels={"group_id": "Groupe commercial", "nb_équipes": "Nb équipes"},
                      title="Équipes affectées par groupe commercial",
-                     color_discrete_map={"L1": "#3498DB", "L2": "#E67E22"})
+                     color_discrete_map={"L1": "#3498DB", "L2": "#E67E22"},
+                     category_orders={"Level": ["L1", "L2"]})
         fig.update_layout(height=300, legend_title_text="Level")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -639,14 +642,16 @@ def render_teams_page():
                 fig.update_layout(height=max(250, 45 * len(df_chart)), legend_title_text="Sourcing")
                 st.plotly_chart(fig, use_container_width=True)
             with ch2:
+                df_chart2 = df_chart.copy()
+                df_chart2["Level"] = "L" + df_chart2["level"].astype(int).astype(str)
                 fig2 = px.bar(
-                    df_chart.sort_values("productivity"),
+                    df_chart2.sort_values("productivity"),
                     x="productivity", y="team_id", orientation="h",
-                    color="level", color_discrete_map={1: "#27AE60", 2: "#8E44AD"},
+                    color="Level", color_discrete_map={"L1": "#27AE60", "L2": "#8E44AD"},
                     labels={"productivity": "Productivité (0–1)", "team_id": ""},
                     title="Productivité par équipe",
                 )
-                fig2.update_layout(height=max(250, 45 * len(df_chart)), legend_title_text="Level")
+                fig2.update_layout(height=max(250, 45 * len(df_chart2)), legend_title_text="Level")
                 fig2.update_xaxes(range=[0, 1.05])
                 st.plotly_chart(fig2, use_container_width=True)
 
@@ -896,26 +901,28 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
         sla_data = C.table("service_params")
         if not sla_data.empty:
             sla_data = sla_data.copy()
-            sla_data["label"] = "L" + sla_data["level"].astype(str) + " — " + \
-                sla_data["group_id"].fillna("global") if "group_id" in sla_data.columns else \
-                "L" + sla_data["level"].astype(str)
+            sla_data["Level"] = "L" + sla_data["level"].astype(int).astype(str)
+            if "group_id" in sla_data.columns:
+                sla_data["label"] = sla_data["Level"] + " — " + sla_data["group_id"].fillna("global")
+            else:
+                sla_data["label"] = sla_data["Level"]
             ch1, ch2 = st.columns(2)
             with ch1:
                 fig_sl = px.bar(sla_data, x="label", y="sl_target",
-                                color="level", text="sl_target",
+                                color="Level", text="sl_target",
                                 labels={"label": "", "sl_target": "SLA cible"},
                                 title="SLA cible par configuration",
-                                color_discrete_map={1: "#3498DB", 2: "#E67E22"})
+                                color_discrete_map={"L1": "#3498DB", "L2": "#E67E22"})
                 fig_sl.update_traces(texttemplate="%{text:.0%}")
                 fig_sl.update_yaxes(range=[0, 1.05], tickformat=".0%")
                 fig_sl.update_layout(height=300, showlegend=False)
                 st.plotly_chart(fig_sl, use_container_width=True)
             with ch2:
                 fig_sh = px.bar(sla_data, x="label", y="shrinkage",
-                                color="level", text="shrinkage",
+                                color="Level", text="shrinkage",
                                 labels={"label": "", "shrinkage": "Shrinkage"},
                                 title="Shrinkage par configuration",
-                                color_discrete_map={1: "#3498DB", 2: "#E67E22"})
+                                color_discrete_map={"L1": "#3498DB", "L2": "#E67E22"})
                 fig_sh.update_traces(texttemplate="%{text:.0%}")
                 fig_sh.update_yaxes(range=[0, 0.6], tickformat=".0%")
                 fig_sh.update_layout(height=300, showlegend=False)

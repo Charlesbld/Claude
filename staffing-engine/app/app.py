@@ -86,7 +86,8 @@ pages = {
         st.Page(P.render_coverage, title="⑥ Couverture & coûts", icon="🗓️"),
     ],
     "Analyse": [
-        st.Page(P.render_forecast, title="Réel vs Forecast", icon="🔍"),
+        st.Page(P.render_forecast,        title="Réel vs Forecast",       icon="🔍"),
+        st.Page(P.render_monthly_report,  title="Rapport mensuel",         icon="📊"),
     ],
     "Outils": [
         st.Page(P.render_explorer, title="Explorateur",        icon="🔎"),

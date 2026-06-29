@@ -7,4 +7,5 @@ holidays>=0.45     # calendriers par pays (A1)
 streamlit>=1.30    # restitution (F)
 plotly>=5.18       # heatmap / graphes (F)
 pulp>=2.7,<4       # optimiseur de répartition (IP, solveur CBC)
+openpyxl>=3.1      # export Excel (rapport mensuel)
 pytest>=8.0        # validation des calculs

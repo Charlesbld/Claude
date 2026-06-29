@@ -1,6 +1,8 @@
 """Pages de l'application (rendues via st.navigation)."""
 from __future__ import annotations
 
+import io
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -830,3 +832,168 @@ def render_editor():
         C.save_table(name, edited)
         st.success(f"Table « {spec.label} » enregistrée.")
         st.rerun()
+
+
+# =============================================================================
+# RAPPORT MENSUEL (IMP-1)
+# =============================================================================
+def _build_monthly_report(month: str, prev_month: str | None = None) -> io.BytesIO:
+    """Génère un rapport mensuel Excel (3 onglets) en mémoire."""
+    cov = C.coverage(month, C.db_version())
+    matching = cov["matching"]
+    supply_team = cov["supply_team"]
+    demand = cov["demand"]
+
+    # Ajouter sourcing depuis la table team (requis par cost_fte_summary)
+    teams = C.table("team")
+    supply_with_sourcing = (
+        supply_team.merge(teams[["team_id", "sourcing"]], on="team_id", how="left")
+        if not supply_team.empty
+        else supply_team
+    )
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+
+        # --- Onglet 1 : Synthèse -----------------------------------------------
+        if not supply_team.empty and not matching.empty:
+            summary = reporting.cost_fte_summary(demand, supply_with_sourcing, matching)
+            by_level = summary["by_level"]
+            req_by_group = summary["required_by_group"]
+            cost_by_team = summary["cost_by_team"]
+
+            # Coût total par groupe et par level (depuis matching)
+            cost_group = (
+                matching.groupby(["level", "group_id"])
+                .agg(
+                    total_cost=("cost", "sum"),
+                    fte_requis_pic=("required_fte", "max"),
+                    fte_capacite_pic=("effective_capacity", "max"),
+                    pct_sous_staffe=(
+                        "understaffed",
+                        lambda s: f"{100 * s.mean():.1f}%",
+                    ),
+                )
+                .reset_index()
+                .sort_values(["level", "total_cost"], ascending=[True, False])
+            )
+            cost_group.to_excel(writer, sheet_name="Synthèse", index=False, startrow=0)
+
+            # ETP requis vs capacité (par level)
+            by_level_out = by_level[
+                ["level", "total_cost", "required_fte_peak", "capacity_peak",
+                 "required_fte_avg", "capacity_avg", "hours_understaffed"]
+            ]
+            startrow = len(cost_group) + 3
+            by_level_out.to_excel(writer, sheet_name="Synthèse", index=False, startrow=startrow)
+        else:
+            # Aucune allocation : on écrit un onglet vide avec message
+            pd.DataFrame({"info": ["Aucune allocation pour ce mois. Lancez l'optimiseur."]}).to_excel(
+                writer, sheet_name="Synthèse", index=False)
+
+        # --- Onglet 2 : Comparatif M vs M-1 ------------------------------------
+        if prev_month:
+            try:
+                cov_prev = C.coverage(prev_month, C.db_version())
+                matching_prev = cov_prev["matching"]
+                demand_prev = cov_prev["demand"]
+
+                def _kpis(m, d):
+                    return {
+                        "total_cost": m["cost"].sum() if not m.empty else 0.0,
+                        "fte_requis_peak": m["required_fte"].max() if not m.empty else 0.0,
+                        "contacts": d["contacts"].sum() if not d.empty else 0.0,
+                    }
+
+                kpi_curr = _kpis(matching, demand)
+                kpi_prev = _kpis(matching_prev, demand_prev)
+
+                comp = pd.DataFrame([
+                    {"KPI": "Coût total (€)", prev_month: kpi_prev["total_cost"],
+                     month: kpi_curr["total_cost"],
+                     "Delta": kpi_curr["total_cost"] - kpi_prev["total_cost"]},
+                    {"KPI": "ETP requis pic", prev_month: kpi_prev["fte_requis_peak"],
+                     month: kpi_curr["fte_requis_peak"],
+                     "Delta": kpi_curr["fte_requis_peak"] - kpi_prev["fte_requis_peak"]},
+                    {"KPI": "Contacts totaux", prev_month: kpi_prev["contacts"],
+                     month: kpi_curr["contacts"],
+                     "Delta": kpi_curr["contacts"] - kpi_prev["contacts"]},
+                ])
+                comp.to_excel(writer, sheet_name="Comparatif M vs M-1", index=False)
+            except Exception:
+                pd.DataFrame({"info": [f"Données indisponibles pour {prev_month}."]}).to_excel(
+                    writer, sheet_name="Comparatif M vs M-1", index=False)
+        else:
+            pd.DataFrame({"info": ["Aucun mois précédent disponible."]}).to_excel(
+                writer, sheet_name="Comparatif M vs M-1", index=False)
+
+        # --- Onglet 3 : Gaps prioritaires --------------------------------------
+        if not matching.empty:
+            gaps = reporting.gap_intervals(matching, top=20)
+            if gaps.empty:
+                pd.DataFrame({"info": ["Aucun trou de couverture."]}).to_excel(
+                    writer, sheet_name="Gaps prioritaires", index=False)
+            else:
+                gaps_out = gaps.copy()
+                # Convertir les colonnes datetime en chaînes pour Excel
+                for col in ["start_utc", "end_utc"]:
+                    if col in gaps_out.columns:
+                        gaps_out[col] = gaps_out[col].dt.tz_convert(BUSINESS_TZ).dt.strftime("%Y-%m-%d %H:%M")
+                gaps_out.to_excel(writer, sheet_name="Gaps prioritaires", index=False)
+        else:
+            pd.DataFrame({"info": ["Aucune donnée de couverture disponible."]}).to_excel(
+                writer, sheet_name="Gaps prioritaires", index=False)
+
+    buf.seek(0)
+    return buf
+
+
+def render_monthly_report():
+    """Rapport mensuel synthétique exportable (IMP-1)."""
+    st.header("📊 Rapport mensuel")
+    st.markdown(
+        "Agrégez les KPI clés pour un mois sélectionné et exportez-les en **Excel** (3 onglets : "
+        "Synthèse · Comparatif M vs M-1 · Gaps prioritaires)."
+    )
+
+    all_months = C.months()
+    month = C.month_selector(key="report_month")
+    month_idx = all_months.index(month) if month in all_months else 0
+    prev_month = all_months[month_idx - 1] if month_idx > 0 else None
+
+    # Aperçu rapide des KPI
+    cov = C.coverage(month, C.db_version())
+    matching = cov["matching"]
+
+    if not matching.empty:
+        kpis = reporting.summary_kpis(matching)
+        st.subheader(f"KPI — {month}")
+        st.dataframe(kpis.style.format({
+            "total_cost": "{:,.0f} €",
+            "required_fte_peak": "{:.1f}",
+            "capacity_peak": "{:.1f}",
+            "pct_buckets_understaffed": "{:.1f}%",
+            "hours_understaffed": "{:.1f} h",
+            "real_occupancy_p50": "{:.1%}",
+            "real_occupancy_p95": "{:.1%}",
+        }), hide_index=True, use_container_width=True)
+    else:
+        st.info("Aucune allocation pour ce mois. Le rapport contiendra uniquement les données de demande.")
+
+    st.divider()
+    st.subheader("Export Excel")
+    if prev_month:
+        st.caption(f"Le comparatif inclura le mois précédent : **{prev_month}**.")
+    else:
+        st.caption("Pas de mois précédent disponible pour le comparatif.")
+
+    with st.spinner("Génération du rapport Excel…"):
+        excel_buf = _build_monthly_report(month, prev_month)
+
+    st.download_button(
+        label="⬇️ Télécharger le rapport mensuel (Excel)",
+        data=excel_buf,
+        file_name=f"rapport_staffing_{month}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+    )

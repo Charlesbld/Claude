@@ -208,11 +208,16 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
 
         # Extract allocation: agents per (team, slot) = sum of x[(team, sid)]
         # for all shifts covering that slot.
+        # When the LP is infeasible (demand > capacity), CBC may return values that
+        # violate the cap constraints. We enforce the cap explicitly after solving.
         for team in all_active_teams:
+            cap_val = int(cap[team]) if pd.notna(cap[team]) else None
             for slot in range(BUCKETS_PER_DAY):
                 agents = sum((x[(team, sid)].value() or 0)
                              for (sid, _L) in cover_idx[team][slot]
                              if (team, sid) in x)
+                if cap_val is not None:
+                    agents = min(agents, cap_val)
                 rounded = int(round(agents))
                 if rounded > 0:
                     alloc_rows.append({"dow": dow, "slot_utc": slot,

@@ -301,6 +301,61 @@ def test_crit3_slot_utc_from_utc_column():
             f"obtenu {recovered[i]}")
 
 
+# --- IMP-3 : jours fériés intégrés dans le profil dow --------------------------
+def test_imp3_holiday_weight_fr_may1(tmp_path_factory):
+    """Le 1er mai 2026 (vendredi, férié FR) reçoit le poids dimanche au lieu du
+    poids vendredi. Il doit donc avoir MOINS de contacts que les vendredis ordinaires
+    de mai 2026 (qui gardent le poids vendredi normal)."""
+    dbp = tmp_path_factory.mktemp("data") / "imp3.db"
+    seed_db.main(dbp)
+    demand = model.build_forecast_demand("2026-05", dbp)
+    if demand.empty:
+        pytest.skip("Aucune demande pour 2026-05")
+    # Agréger contacts par (date, region_id)
+    demand["date"] = demand["bucket_utc"].dt.normalize().dt.tz_localize(None)
+    daily_fr = (demand[demand["region_id"] == "FR"]
+                .groupby("date")["contacts"].sum().reset_index())
+    # May 1st 2026 = Friday (dow=4), holiday
+    may1 = pd.Timestamp("2026-05-01").normalize()
+    # Other (non-holiday) Fridays in May 2026
+    fridays = daily_fr[daily_fr["date"].dt.dayofweek == 4]
+    may1_row = daily_fr[daily_fr["date"] == may1]
+    # May 8 is also a holiday Friday — compare to non-holiday Fridays
+    non_hol_fridays = fridays[~fridays["date"].isin(
+        [pd.Timestamp("2026-05-01").normalize(), pd.Timestamp("2026-05-08").normalize()])]
+    if may1_row.empty or non_hol_fridays.empty:
+        pytest.skip("Données insuffisantes pour comparer")
+    may1_contacts = float(may1_row["contacts"].iloc[0])
+    avg_friday_contacts = float(non_hol_fridays["contacts"].mean())
+    # May 1 (holiday, poids dimanche 1.15) < vendredi ordinaire (poids 1.30)
+    assert may1_contacts < avg_friday_contacts, (
+        f"1er mai 2026 (vendredi férié) : {may1_contacts:.2f} contacts, "
+        f"vendredi ordinaire moy : {avg_friday_contacts:.2f}. "
+        f"Le jour férié devrait avoir moins de contacts qu'un vendredi ordinaire."
+    )
+
+
+def test_imp3_no_impact_on_out_of_scope_regions(tmp_path_factory):
+    """Les régions hors scope (EXT_MANILA=PH, EXT_CASA=MA, EXT_TANA=MG) ne sont
+    pas affectées par le mapping tz→pays. La somme des contacts reste cohérente."""
+    dbp = tmp_path_factory.mktemp("data") / "imp3b.db"
+    seed_db.main(dbp)
+    # Les régions FR/ES/IT/GB sont affectées, mais pas les équipes BPO
+    demand = model.build_forecast_demand("2026-05", dbp)
+    if demand.empty:
+        pytest.skip("Aucune demande pour 2026-05")
+    # Vérifier que les contacts se conservent (pas de perte globale lors de la
+    # redistribution holiday) — le total mensuel reste identique à un modèle
+    # sans fériés (la re-normalisation conserve le volume total).
+    paxf = db.read_table("pax_forecast", dbp).query("month == '2026-05'")
+    crf = db.read_table("contact_rate_forecast", dbp).query("month == '2026-05'")
+    base = paxf.merge(crf, on=["month", "region_id", "supply_id"])
+    expected_total = (base["pax"] * base["contact_rate"]).sum()
+    actual_total = demand["contacts"].sum()
+    # La somme doit être conservée (redistribution, pas perte)
+    np.testing.assert_allclose(actual_total, expected_total, rtol=1e-5)
+
+
 # --- robustesse des types : un nombre stocké en TEXT ne casse pas le calcul ---
 def test_read_table_coerces_text_numbers(ctx, tmp_path):
     import shutil

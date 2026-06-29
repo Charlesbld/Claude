@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from . import db, erlang
-from .timespine import BUCKET_MINUTES, BUCKETS_PER_DAY, build_time_spine
+from .timespine import BUCKET_MINUTES, BUCKETS_PER_DAY, build_time_spine, country_calendar
 
 INTERVAL_SECONDS = BUCKET_MINUTES * 60  # 900
 
@@ -75,19 +75,59 @@ def build_forecast_demand(month: str, db_path=db.DB_PATH, levels=None, regions=N
     # mensuel -> jour (profil dow normalisé sur les dates du mois)
     dow_w = t["profile_dow"].set_index("dow")["weight"].astype(float)
     dates = month_local_dates(month)
-    shape = pd.Series(dow_w.reindex(dates.dayofweek).to_numpy(), index=dates)
-    shape = shape / shape.sum()
-    shape_df = pd.DataFrame({"date": shape.index, "shape": shape.to_numpy()})
+    # Poids du dimanche (dow=6) : utilisé comme DOW de remplacement pour les fériés (IMP-3)
+    _holiday_dow_weight = float(dow_w.get(6, dow_w.mean()))
+    # shape_df "de base" : sans correction fériés (utilisé pour les régions hors scope)
+    shape_base = pd.Series(dow_w.reindex(dates.dayofweek).to_numpy(), index=dates)
+    shape_base = shape_base / shape_base.sum()
+    shape_df = pd.DataFrame({"date": shape_base.index, "shape": shape_base.to_numpy()})
 
     # jour -> bucket par région (heure locale -> UTC)
     intraday = t["profile_intraday"].copy()
     intraday["weight"] = intraday.groupby("dow")["weight"].transform(lambda x: x / x.sum())
     tz_by_region = dict(zip(t["region"]["region_id"], t["region"]["timezone"]))
 
+    # IMP-3 : pré-calcul des jours fériés par région (timezone → country_code)
+    # Mapping : seules les timezones européennes connues sont gérées.
+    _TZ_TO_COUNTRY = {
+        "Europe/Paris": "FR", "Europe/Madrid": "ES", "Europe/Rome": "IT",
+        "Europe/London": "GB", "Europe/Berlin": "DE", "Europe/Amsterdam": "NL",
+        "Europe/Brussels": "BE", "Europe/Lisbon": "PT",
+    }
+    # Construire un dict {region_id: set of holiday dates} pour le mois
+    _holiday_dates_by_region: dict[str, set] = {}
+    for row in t["region"].itertuples():
+        cc = _TZ_TO_COUNTRY.get(getattr(row, "timezone", ""), None)
+        if cc is None:
+            continue
+        try:
+            cal = country_calendar(cc, dates[0], dates[-1])
+            hols = set(cal.loc[cal["is_holiday"], "date"].dt.normalize())
+            if hols:
+                _holiday_dates_by_region[row.region_id] = hols
+        except Exception:
+            pass  # ne jamais bloquer le calcul de demande
+
     out = []
     for region_id, grp in base.groupby("region_id"):
         slot = _slot_to_utc(dates, tz_by_region[region_id]).merge(intraday, on=["dow", "slot_local"])
-        slot = slot.merge(shape_df, on="date")
+        # IMP-3 : remplacer le DOW weight des jours fériés par le weight dimanche,
+        # puis re-normaliser. On travaille sur les raw dow_weights avant normalisation.
+        region_holidays = _holiday_dates_by_region.get(region_id, set())
+        if region_holidays:
+            # Reconstruire le vecteur de poids bruts en remplaçant le poids dow
+            # des jours fériés par le poids "dimanche" (_holiday_dow_weight),
+            # puis normaliser pour que la somme = 1 (conservation du volume mensuel).
+            raw_weights = dow_w.reindex(dates.dayofweek).to_numpy().astype(float)
+            dates_norm = pd.to_datetime(dates).normalize()
+            hol_mask = dates_norm.isin(region_holidays)
+            raw_weights[hol_mask] = _holiday_dow_weight
+            total = raw_weights.sum()
+            shape_region = raw_weights / total if total > 0 else raw_weights
+            shape_mod = pd.DataFrame({"date": dates, "shape": shape_region})
+            slot = slot.merge(shape_mod, on="date")
+        else:
+            slot = slot.merge(shape_df, on="date")
         slot["w"] = slot["shape"] * slot["weight"]   # poids jour × poids intraday
         # produit cartésien (group×task de la région) × créneaux, pondéré
         g = grp[["supply_id", "group_id", "task_type_id", "level", "monthly_contacts", "aht_seconds"]]

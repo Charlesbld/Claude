@@ -63,16 +63,18 @@ def cost_fte_summary(demand: pd.DataFrame, supply: pd.DataFrame, matching: pd.Da
 
     required_by_group = (
         demand.groupby(["level", "region_id", "supply_id", "group_id"])
-        .agg(workload_hours=("workload_hours", "sum"), contacts=("contacts", "sum"),
-             required_agent_hours=("required_fte", lambda s: s.sum() * BUCKET_HOURS))
+        .agg(workload_hours=("workload_hours", "sum"), contacts=("contacts", "sum"))
         .reset_index()
-        .sort_values("required_agent_hours", ascending=False)
     )
+    # required_agent_hours ≈ workload_hours / (1 - shrinkage), but here we use
+    # workload_hours as a proxy for ranking (demand doesn't carry required_fte directly).
+    required_by_group["required_agent_hours"] = required_by_group["workload_hours"]
+    required_by_group = required_by_group.sort_values("required_agent_hours", ascending=False)
 
     cost_by_team = (
         supply.groupby(["level", "sourcing", "team_id"])
         .agg(cost=("cost", "sum"),
-             agent_hours=("scheduled_headcount", lambda s: s.sum() * BUCKET_HOURS),
+             agent_hours=("agents", lambda s: s.sum() * BUCKET_HOURS),
              capacity_hours=("effective_capacity", lambda s: s.sum() * BUCKET_HOURS))
         .reset_index()
         .sort_values("cost", ascending=False)

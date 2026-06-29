@@ -520,7 +520,14 @@ def render_coverage():
     edited = st.data_editor(grid, width="stretch", hide_index=True, height=300, key=f"alloc_{dow}_{level}")
     if st.button("💾 Enregistrer la répartition", type="primary"):
         e = edited.copy()
-        e["slot_utc"] = range(96)
+        # Reconstituer slot_utc depuis la colonne 'UTC' (format 'HH:MM') pour
+        # résister au tri du tableau par l'utilisateur (CRIT-3).
+        # Si la colonne 'UTC' a été supprimée par data_editor, on la recalcule
+        # depuis l'index d'origine du grid avant le melt.
+        if "UTC" not in e.columns:
+            e = e.reset_index(drop=True)
+            e["UTC"] = e.index.map(lambda i: f"{i * 15 // 60:02d}:{i * 15 % 60:02d}")
+        e["slot_utc"] = e["UTC"].map(lambda s: int(s[:2]) * 4 + int(s[3:]) // 15)
         long = e.melt(id_vars="slot_utc", value_vars=teams_lvl, var_name="team_id", value_name="agents")
         long = long[long["agents"] > 0]
         long["dow"] = dow

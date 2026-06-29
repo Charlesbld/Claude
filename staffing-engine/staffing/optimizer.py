@@ -119,51 +119,104 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
                 for slot in cover:
                     cover_idx[team][slot].append((sid, L))
 
+        # --- Build a single IP per dow with shared variables across all groups ---
+        # Key insight: x[(team, sid)] represents total physical agents from a team
+        # on a shift. A team can serve multiple groups simultaneously (their capacity
+        # is split / shared across groups in expand_allocation + build_coverage).
+        #
+        # The old per-(group,level) IP allowed the same team to have cap[team] agents
+        # allocated to group A AND cap[team] agents to group B, violating physical limits.
+        #
+        # Fix: one global IP per dow where x[(team, sid)] is shared. The total agents
+        # per (team, slot) = sum of x[(team, sid)] for all shifts covering that slot.
+        # This sum must be <= cap[team] (the physical headcount limit).
+        #
+        # Coverage constraints: for each (group, level, slot), require that the teams
+        # assigned to that group collectively cover the ETP requirement.
+
+        # Collect all (group_id, level) combos active this dow
+        gl_pairs = []
         for group_id in groups:
             levels = rep[(rep["dow"] == dow) & (rep["group_id"] == group_id)]["level"].unique()
             for level in levels:
                 team_ids = teams_for(group_id, level)
-                if not team_ids:
-                    continue
-                req_d = {int(r.slot_utc): r.required_fte
-                         for r in rep[(rep["dow"] == dow) & (rep["group_id"] == group_id)
-                                      & (rep["level"] == level)].itertuples()}
-                # build IP for this (group, level, dow)
-                prob = pulp.LpProblem(f"alloc_{dow}_{group_id}_{level}", pulp.LpMinimize)
-                x = {}
-                for team in team_ids:
-                    ub = int(cap[team]) if pd.notna(cap[team]) else None
-                    for sid, L, _cover in cand[team]:
-                        x[(team, sid)] = pulp.LpVariable(
-                            f"x_{team}_{sid}", lowBound=0, upBound=ub, cat="Integer")
-                if not x:
-                    continue
-                prob += pulp.lpSum(var * L * BUCKET_HOURS * cost_h[team]
-                                   for (team, sid), var in x.items()
-                                   for (_s, L, _c) in cand[team] if _s == sid)
-                for slot in range(BUCKETS_PER_DAY):
-                    need = req_d.get(slot, 0.0)
-                    if need > 0:
-                        terms = [x[(team, sid)] * prod[team]
-                                 for team in team_ids
-                                 for (sid, _L) in cover_idx[team][slot]
-                                 if (team, sid) in x]
-                        if terms:
-                            prob += pulp.lpSum(terms) >= need
-                    for team in team_ids:
-                        if pd.notna(cap[team]) and cover_idx[team][slot]:
-                            prob += pulp.lpSum(x[(team, sid)]
-                                               for (sid, _L) in cover_idx[team][slot]
-                                               if (team, sid) in x) <= int(cap[team])
-                prob.solve(solver)
-                for team in team_ids:
-                    for slot in range(BUCKETS_PER_DAY):
-                        agents = sum((x[(team, sid)].value() or 0)
-                                     for (sid, _L) in cover_idx[team][slot]
-                                     if (team, sid) in x)
-                        if agents > 0:
-                            alloc_rows.append({"dow": dow, "slot_utc": slot,
-                                               "team_id": team, "agents": int(round(agents))})
+                if team_ids:
+                    gl_pairs.append((group_id, int(level), team_ids))
+
+        if not gl_pairs:
+            continue
+
+        # Collect all teams active this dow (across all groups)
+        all_active_teams: set[str] = set()
+        for _gid, _lvl, tids in gl_pairs:
+            all_active_teams.update(tids)
+
+        prob = pulp.LpProblem(f"alloc_{dow}", pulp.LpMinimize)
+        # x[(team, sid)] = total physical agents on this shift (shared across groups)
+        x: dict[tuple, pulp.LpVariable] = {}
+        for team in all_active_teams:
+            ub = int(cap[team]) if pd.notna(cap[team]) else None
+            for sid, L, _cover in cand[team]:
+                x[(team, sid)] = pulp.LpVariable(
+                    f"x_{team}_{sid}", lowBound=0, upBound=ub, cat="Integer")
+
+        if not x:
+            continue
+
+        # Objective: minimize total cost
+        prob += pulp.lpSum(
+            var * L * BUCKET_HOURS * cost_h[team]
+            for (team, sid), var in x.items()
+            for (_s, L, _c) in cand[team] if _s == sid
+        )
+
+        # Coverage constraints: per (group, level, slot)
+        # A team's effective contribution to a group at a slot =
+        #   agents_at_slot * productivity (capacity shared across groups).
+        # Since expand_allocation merges with team_group (one row per group),
+        # the coverage is computed at the group level using the shared agents.
+        for group_id, level, team_ids in gl_pairs:
+            req_d = {int(r.slot_utc): r.required_fte
+                     for r in rep[(rep["dow"] == dow) & (rep["group_id"] == group_id)
+                                  & (rep["level"] == level)].itertuples()}
+            for slot in range(BUCKETS_PER_DAY):
+                need = req_d.get(slot, 0.0)
+                if need > 0:
+                    terms = [x[(team, sid)] * prod[team]
+                             for team in team_ids
+                             for (sid, _L) in cover_idx[team][slot]
+                             if (team, sid) in x]
+                    if terms:
+                        prob += pulp.lpSum(terms) >= need
+
+        # Global per-slot capacity constraints: for each (team, slot),
+        # sum of agents across all shifts covering that slot <= cap[team].
+        # This is the cross-group constraint that was missing in the original code.
+        for team in all_active_teams:
+            if not pd.notna(cap[team]):
+                continue
+            cap_val = int(cap[team])
+            for slot in range(BUCKETS_PER_DAY):
+                terms = [x[(team, sid)]
+                         for (sid, _L) in cover_idx[team][slot]
+                         if (team, sid) in x]
+                if terms:
+                    # This replaces the per-group constraint with one global constraint
+                    prob += pulp.lpSum(terms) <= cap_val
+
+        prob.solve(solver)
+
+        # Extract allocation: agents per (team, slot) = sum of x[(team, sid)]
+        # for all shifts covering that slot.
+        for team in all_active_teams:
+            for slot in range(BUCKETS_PER_DAY):
+                agents = sum((x[(team, sid)].value() or 0)
+                             for (sid, _L) in cover_idx[team][slot]
+                             if (team, sid) in x)
+                rounded = int(round(agents))
+                if rounded > 0:
+                    alloc_rows.append({"dow": dow, "slot_utc": slot,
+                                       "team_id": team, "agents": rounded})
 
     alloc = pd.DataFrame(alloc_rows, columns=["dow", "slot_utc", "team_id", "agents"])
     if write:

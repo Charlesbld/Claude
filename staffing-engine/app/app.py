@@ -19,15 +19,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # rend 'common'/'pages_app'/'pages_edit' importables
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # rend 'common'/'pages' importables
 
 import streamlit as st  # noqa: E402
 
 st.set_page_config(page_title="Staffing — capacity planning 15 min", layout="wide", page_icon="🗓️")
 
-import common as C        # noqa: E402
-import pages_app as P     # noqa: E402
-import pages_edit as E    # noqa: E402
+import common as C    # noqa: E402
+import pages as P     # noqa: E402
 
 C.ensure_db()
 
@@ -113,19 +112,19 @@ pages = {
         st.Page(P.render_monthly_report, title="Rapport mensuel",   icon="📊"),
     ],
     "Référentiels": [
-        st.Page(E.render_ref_regions, title="Régions & Transports",  icon="🌍"),
-        st.Page(E.render_ref_groups,  title="Groupes commerciaux",   icon="🏷️"),
-        st.Page(E.render_ref_tasks,   title="Types de tâche",        icon="📋"),
+        st.Page(P.render_ref_regions, title="Régions & Transports",  icon="🌍"),
+        st.Page(P.render_ref_groups,  title="Groupes commerciaux",   icon="🏷️"),
+        st.Page(P.render_ref_tasks,   title="Types de tâche",        icon="📋"),
     ],
     "Équipes": [
-        st.Page(E.render_teams_page, title="Équipes, dispo & groupes", icon="👥"),
+        st.Page(P.render_teams_page, title="Équipes, dispo & groupes", icon="👥"),
     ],
     "Paramètres": [
-        st.Page(E.render_params_page, title="AHT & Objectifs SLA", icon="⚙️"),
+        st.Page(P.render_params_page, title="AHT & Objectifs SLA", icon="⚙️"),
     ],
     "Outils": [
         st.Page(P.render_explorer, title="Explorateur", icon="🔎"),
-        st.Page(E.render_glossary, title="Glossaire",   icon="📖"),
+        st.Page(P.render_glossary, title="Glossaire",   icon="📖"),
     ],
 }
 st.navigation(pages).run()

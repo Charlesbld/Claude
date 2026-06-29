@@ -58,10 +58,28 @@ def build_forecast_demand(month: str, db_path=db.DB_PATH, levels=None, regions=N
     crf = t["contact_rate_forecast"][t["contact_rate_forecast"]["month"] == month]
     gmap = t["group_map"][(t["group_map"]["month"] == month) & (t["group_map"]["active"] == 1)]
 
-    base = (paxf.merge(crf, on=["month", "region_id", "supply_id"])
-            .merge(t["task_type"][["task_type_id", "level"]], on="task_type_id")
-            .merge(gmap[["region_id", "supply_id", "group_id"]], on=["region_id", "supply_id"])
-            .merge(t["param_aht"], on="task_type_id"))
+    # IMP-4 : param_aht peut avoir une colonne group_id optionnelle.
+    # Si c'est le cas, faire un merge prioritaire : (task_type_id, group_id) > (task_type_id, NULL).
+    aht_df = t["param_aht"]
+    base_pre = (paxf.merge(crf, on=["month", "region_id", "supply_id"])
+                .merge(t["task_type"][["task_type_id", "level"]], on="task_type_id")
+                .merge(gmap[["region_id", "supply_id", "group_id"]], on=["region_id", "supply_id"]))
+    if "group_id" in aht_df.columns:
+        # Séparer lignes génériques (group_id=NULL) et spécifiques
+        aht_generic = aht_df[aht_df["group_id"].isna()][["task_type_id", "aht_seconds"]]
+        aht_specific = aht_df[aht_df["group_id"].notna()][["task_type_id", "group_id", "aht_seconds"]]
+        # Merge prioritaire : spécifique sur (task_type_id, group_id), puis fallback générique
+        base_with_spec = base_pre.merge(
+            aht_specific.rename(columns={"aht_seconds": "aht_seconds_spec"}),
+            on=["task_type_id", "group_id"], how="left")
+        base_with_gen = base_with_spec.merge(
+            aht_generic.rename(columns={"aht_seconds": "aht_seconds_gen"}),
+            on="task_type_id", how="left")
+        base_with_gen["aht_seconds"] = base_with_gen["aht_seconds_spec"].combine_first(
+            base_with_gen["aht_seconds_gen"])
+        base = base_with_gen.drop(columns=["aht_seconds_spec", "aht_seconds_gen"])
+    else:
+        base = base_pre.merge(aht_df[["task_type_id", "aht_seconds"]], on="task_type_id")
     base["monthly_contacts"] = base["pax"] * base["contact_rate"]
     if levels:
         base = base[base["level"].isin(levels)]
@@ -142,10 +160,49 @@ def build_forecast_demand(month: str, db_path=db.DB_PATH, levels=None, regions=N
     return demand.sort_values(["bucket_utc", "level", "task_type_id", "group_id"]).reset_index(drop=True)
 
 
+def _get_service_params(sp_df: pd.DataFrame, level: int, group_id: str) -> pd.Series:
+    """Renvoie les paramètres SLA pour un (level, group_id) avec fallback sur (level, NULL).
+
+    IMP-4 : si service_params possède une colonne group_id, une ligne
+    (level, group_id) spécifique prend la priorité sur la ligne générique
+    (level, group_id=NULL/NaN). Sans colonne group_id, comportement identique
+    à l'original (compatibilité rétrograde).
+    """
+    if "group_id" in sp_df.columns:
+        # Chercher d'abord une ligne spécifique (level, group_id)
+        specific = sp_df[(sp_df["level"] == level) & (sp_df["group_id"] == group_id)]
+        if not specific.empty:
+            return specific.iloc[0]
+        # Fallback sur la ligne générique (level, group_id=NULL)
+        generic = sp_df[(sp_df["level"] == level) & (sp_df["group_id"].isna())]
+        if not generic.empty:
+            return generic.iloc[0]
+        # Fallback final sur n'importe quelle ligne de ce level
+        any_level = sp_df[sp_df["level"] == level]
+        if not any_level.empty:
+            return any_level.iloc[0]
+        return None
+    else:
+        # Comportement original : index par level
+        if level in sp_df.index:
+            return sp_df.loc[level]
+        return None
+
+
 # --- Erlang C : ETP requis par (bucket, level, group_id) ---------------------
 def required_by_group(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
-    """ETP requis par (bucket_utc × level × group_id) — Erlang C par groupe commercial."""
-    sp = db.read_table("service_params", db_path).set_index("level")
+    """ETP requis par (bucket_utc × level × group_id) — Erlang C par groupe commercial.
+
+    IMP-4 : si service_params contient une colonne group_id optionnelle, les
+    paramètres SLA spécifiques à un groupe (level, group_id) ont la priorité sur
+    les paramètres génériques (level, NULL). Rétro-compatible.
+    """
+    sp = db.read_table("service_params", db_path)
+    # Compatibilité rétrograde : si pas de colonne group_id, indexer par level
+    if "group_id" not in sp.columns:
+        sp_indexed = sp.set_index("level")
+    else:
+        sp_indexed = None  # utiliser _get_service_params()
     pooled = demand.groupby(["bucket_utc", "level", "group_id"], as_index=False).agg(
         contacts=("contacts", "sum"),
         workload_hours=("workload_hours", "sum"),
@@ -155,9 +212,14 @@ def required_by_group(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
                                  pooled["workload_seconds"] / pooled["contacts"], 0.0)
     frames = []
     for (level, group_id), sub in pooled.groupby(["level", "group_id"]):
-        if level not in sp.index:
-            continue
-        p = sp.loc[level]
+        if sp_indexed is not None:
+            if level not in sp_indexed.index:
+                continue
+            p = sp_indexed.loc[level]
+        else:
+            p = _get_service_params(sp, level, group_id)
+            if p is None:
+                continue
         sub = sub.copy()
         sub["agents_online"] = erlang.required_agents_series(
             sub["contacts"], sub["aht_eff"], float(p["sl_target"]), float(p["sl_seconds"]),
@@ -178,7 +240,11 @@ def required_by_level(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
     if by_group.empty:
         return by_group.drop(columns=["group_id"], errors="ignore")
     # re-aggregate across groups: sum contacts/workload, average shrinkage
-    sp = db.read_table("service_params", db_path).set_index("level")
+    sp_raw = db.read_table("service_params", db_path)
+    # IMP-4 : si group_id existe, filtrer sur les lignes génériques (group_id=NULL)
+    if "group_id" in sp_raw.columns:
+        sp_raw = sp_raw[sp_raw["group_id"].isna()].drop(columns=["group_id"])
+    sp = sp_raw.set_index("level")
     pooled = by_group.groupby(["bucket_utc", "level"], as_index=False).agg(
         contacts=("contacts", "sum"),
         workload_hours=("workload_hours", "sum"),

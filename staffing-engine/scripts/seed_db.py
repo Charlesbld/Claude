@@ -82,8 +82,9 @@ TEAM_GROUP = [
 ]
 
 SERVICE_PARAMS = [  # cible Erlang C : 95% en ≤120s pour L1
-    {"level": 1, "sl_target": 0.95, "sl_seconds": 120, "shrinkage": 0.30, "max_occupancy": 0.92},
-    {"level": 2, "sl_target": 0.90, "sl_seconds": 300, "shrinkage": 0.28, "max_occupancy": 0.88}]
+    # group_id=None : paramètres génériques (s'appliquent à tous les groupes sans ligne spécifique)
+    {"level": 1, "group_id": None, "sl_target": 0.95, "sl_seconds": 120, "shrinkage": 0.30, "max_occupancy": 0.92},
+    {"level": 2, "group_id": None, "sl_target": 0.90, "sl_seconds": 300, "shrinkage": 0.28, "max_occupancy": 0.88}]
 MONTH_FACTOR = [0.75, 0.78, 0.88, 0.95, 1.05, 1.25, 1.45, 1.40, 1.10, 0.95, 0.85, 1.05]  # saisonnalité
 REGION_REAL_BIAS = {"FR": 1.00, "ES": 1.03, "IT": 0.96, "GB": 0.82}  # GB : forecast trop haut
 

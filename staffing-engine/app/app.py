@@ -4,26 +4,30 @@
     cd staffing-engine
     streamlit run app/app.py
 
-L'appli amorce la base SQLite si besoin, puis propose :
-  • Accueil (explication du fonctionnement)
-  • Demande (étapes ① à ④)
+Navigation :
+  • Accueil
+  • Demande         (étapes ① à ④)
   • Dimensionnement (Erlang C ⑤ + Couverture ⑥)
-  • Analyse (Réel vs Forecast)
-  • Outils (Explorateur + Éditeur)
+  • Analyse         (Réel vs Forecast · Rapport mensuel)
+  • Référentiels    (Régions · Groupes · Types de tâche)
+  • Équipes         (Fiche · Disponibilités · Affectation)
+  • Paramètres      (AHT · Objectifs SLA)
+  • Outils          (Explorateur · Glossaire)
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # rend 'common'/'pages_app' importables
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # rend 'common'/'pages_app'/'pages_edit' importables
 
 import streamlit as st  # noqa: E402
 
 st.set_page_config(page_title="Staffing — capacity planning 15 min", layout="wide", page_icon="🗓️")
 
-import common as C  # noqa: E402  (configure aussi le sys.path racine)
-import pages_app as P  # noqa: E402
+import common as C        # noqa: E402
+import pages_app as P     # noqa: E402
+import pages_edit as E    # noqa: E402
 
 C.ensure_db()
 
@@ -62,15 +66,34 @@ def render_home():
             "**Offre & optimiseur** — un programme linéaire choisit la **répartition d'agents la moins chère** "
             "couvrant le requis (par groupe × jour de semaine). Résultat **éditable**.")
 
-    st.info("👉 Naviguez par étape (① à ⑥ dans le menu), lancez l'optimiseur dans **⑥ Couverture & coûts**, "
-            "puis explorez. Toutes les tables sont visibles dans **Explorateur** et modifiables dans **Éditer**.")
+    st.info(
+        "👉 Naviguez par étape (① à ⑥ dans **Demande** et **Dimensionnement**), "
+        "lancez l'optimiseur dans **⑥ Couverture & coûts**, "
+        "puis éditez les données dans **Référentiels**, **Équipes** et **Paramètres**. "
+        "Tous les termes sont définis dans **Outils → Glossaire**."
+    )
+
     with st.expander("Hypothèses de modélisation"):
         st.markdown(
             "- Tout est stocké en **UTC** ; l'affichage est en heure de Paris.\n"
             "- **Routage par groupe** : chaque groupe commercial (DIRECT_AIR, RAIL, OTA…) n'est couvert "
             "que par les équipes affectées à ce groupe (table `team_group`).\n"
             "- Le **shrinkage** est porté côté demande (gross-up de l'ETP requis), la **productivité** côté offre.\n"
-            "- L'optimiseur résout **un jour de semaine type** réutilisé sur le mois.")
+            "- L'optimiseur résout **un jour de semaine type** réutilisé sur le mois.\n"
+            "- Le **profil intraday** est global (un seul profil pour tous les groupes et régions dans la V2).")
+
+    with st.expander("Guide de navigation"):
+        st.markdown("""
+| Section | Contenu | Fréquence d'utilisation |
+|---------|---------|------------------------|
+| **Demande** ①–④ | Vérifier les données sources, visualiser les contacts par bucket | Mensuel (après import CSV) |
+| **Dimensionnement** ⑤–⑥ | Lancer l'optimiseur, analyser la couverture et les coûts | Mensuel |
+| **Analyse** | Comparer réel vs forecast, générer le rapport Excel | Mensuel |
+| **Référentiels** | Modifier régions, transports, groupes, types de tâche | Trimestriel / exceptionnel |
+| **Équipes** | Gérer équipes, disponibilités, affectation groupes | Mensuel si changement RH |
+| **Paramètres** | Ajuster AHT, SLA, shrinkage | Trimestriel |
+| **Outils** | Explorateur (pivot libre) + Glossaire | Ad hoc |
+        """)
 
 
 pages = {
@@ -86,12 +109,23 @@ pages = {
         st.Page(P.render_coverage, title="⑥ Couverture & coûts", icon="🗓️"),
     ],
     "Analyse": [
-        st.Page(P.render_forecast,        title="Réel vs Forecast",       icon="🔍"),
-        st.Page(P.render_monthly_report,  title="Rapport mensuel",         icon="📊"),
+        st.Page(P.render_forecast,       title="Réel vs Forecast",  icon="🔍"),
+        st.Page(P.render_monthly_report, title="Rapport mensuel",   icon="📊"),
+    ],
+    "Référentiels": [
+        st.Page(E.render_ref_regions, title="Régions & Transports",  icon="🌍"),
+        st.Page(E.render_ref_groups,  title="Groupes commerciaux",   icon="🏷️"),
+        st.Page(E.render_ref_tasks,   title="Types de tâche",        icon="📋"),
+    ],
+    "Équipes": [
+        st.Page(E.render_teams_page, title="Équipes, dispo & groupes", icon="👥"),
+    ],
+    "Paramètres": [
+        st.Page(E.render_params_page, title="AHT & Objectifs SLA", icon="⚙️"),
     ],
     "Outils": [
-        st.Page(P.render_explorer, title="Explorateur",        icon="🔎"),
-        st.Page(P.render_editor,   title="Éditer les données", icon="✏️"),
+        st.Page(P.render_explorer, title="Explorateur", icon="🔎"),
+        st.Page(E.render_glossary, title="Glossaire",   icon="📖"),
     ],
 }
 st.navigation(pages).run()

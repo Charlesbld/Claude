@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -388,7 +389,9 @@ def _group_map_editor_inline():
         "supply_id": st.column_config.TextColumn("Supply", disabled=True),
         "group_id":  st.column_config.SelectboxColumn("Groupe commercial", options=all_groups),
     }
+    # CheckboxColumn requires bool dtype — cast float 0/1 from pivot
     for m in months_list:
+        piv[m] = piv[m].fillna(0).astype(bool)
         col_config[m] = st.column_config.CheckboxColumn(m)
     edited = st.data_editor(piv, column_config=col_config, hide_index=True,
                             num_rows="fixed", width="stretch", key="ed_gmap_ref")
@@ -472,6 +475,17 @@ def render_ref_groups():
         )
         st.caption("Pour modifier l'affectation, allez dans **Équipes → Affectation groupes**.")
 
+        # Chart: nombre d'équipes par groupe et level
+        count = tg_merged.groupby(["group_id", "level"]).size().reset_index(name="nb_équipes")
+        count["Level"] = "L" + count["level"].astype(str)
+        fig = px.bar(count, x="group_id", y="nb_équipes", color="Level",
+                     barmode="stack",
+                     labels={"group_id": "Groupe commercial", "nb_équipes": "Nb équipes"},
+                     title="Équipes affectées par groupe commercial",
+                     color_discrete_map={"L1": "#3498DB", "L2": "#E67E22"})
+        fig.update_layout(height=300, legend_title_text="Level")
+        st.plotly_chart(fig, use_container_width=True)
+
 
 def render_ref_tasks():
     st.header("📋 Types de tâche (A5)")
@@ -519,17 +533,32 @@ def render_ref_tasks():
     if not aht.empty:
         aht_disp = aht.copy()
         aht_disp["aht_min"] = (aht_disp["aht_seconds"] / 60).round(1)
-        st.dataframe(
-            aht_disp[["task_type_id", "group_id", "aht_seconds", "aht_min"]],
-            hide_index=True, use_container_width=True,
-            column_config={
-                "task_type_id": st.column_config.TextColumn("Type de tâche"),
-                "group_id":     st.column_config.TextColumn("Groupe (vide = tous)"),
-                "aht_seconds":  st.column_config.NumberColumn("AHT (s)"),
-                "aht_min":      st.column_config.NumberColumn("AHT (min)", format="%.1f"),
-            },
-        )
-        st.caption("Pour modifier les AHT → Paramètres → AHT & Objectifs SLA")
+        cols_show = ["task_type_id"]
+        if "group_id" in aht_disp.columns:
+            cols_show.append("group_id")
+        cols_show += ["aht_seconds", "aht_min"]
+        col_cfg = {
+            "task_type_id": st.column_config.TextColumn("Type de tâche"),
+            "aht_seconds":  st.column_config.NumberColumn("AHT (s)"),
+            "aht_min":      st.column_config.NumberColumn("AHT (min)", format="%.1f"),
+        }
+        if "group_id" in aht_disp.columns:
+            col_cfg["group_id"] = st.column_config.TextColumn("Groupe (vide = tous)")
+        st.dataframe(aht_disp[cols_show], hide_index=True, use_container_width=True, column_config=col_cfg)
+
+        # Chart: AHT par type de tâche (moyenne si plusieurs groupes)
+        aht_chart = aht_disp.groupby("task_type_id")["aht_seconds"].mean().reset_index()
+        aht_chart["aht_min"] = (aht_chart["aht_seconds"] / 60).round(1)
+        fig = px.bar(aht_chart.sort_values("aht_seconds", ascending=True),
+                     x="aht_seconds", y="task_type_id", orientation="h",
+                     text="aht_min",
+                     labels={"aht_seconds": "AHT (secondes)", "task_type_id": ""},
+                     title="Temps de traitement moyen par type de tâche",
+                     color="aht_seconds", color_continuous_scale="Blues")
+        fig.update_traces(texttemplate="%{text} min", textposition="outside")
+        fig.update_layout(coloraxis_showscale=False, height=max(250, 50 * len(aht_chart)))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Pour modifier les AHT → **Paramètres → AHT & Objectifs SLA**")
     else:
         st.info("Aucun AHT configuré. Allez dans **Paramètres → AHT & Objectifs SLA**.")
 
@@ -593,6 +622,34 @@ def render_teams_page():
             st.success("Équipes enregistrées.")
             st.rerun()
 
+        # Charts: coût horaire et productivité par équipe
+        df_chart = C.table("team")
+        if not df_chart.empty:
+            st.divider()
+            ch1, ch2 = st.columns(2)
+            with ch1:
+                fig = px.bar(
+                    df_chart.sort_values("hourly_cost"),
+                    x="hourly_cost", y="team_id", orientation="h",
+                    color="sourcing",
+                    color_discrete_map={"external": "#3498DB", "internal": "#E67E22"},
+                    labels={"hourly_cost": "Coût horaire (€/h)", "team_id": ""},
+                    title="Coût horaire par équipe",
+                )
+                fig.update_layout(height=max(250, 45 * len(df_chart)), legend_title_text="Sourcing")
+                st.plotly_chart(fig, use_container_width=True)
+            with ch2:
+                fig2 = px.bar(
+                    df_chart.sort_values("productivity"),
+                    x="productivity", y="team_id", orientation="h",
+                    color="level", color_discrete_map={1: "#27AE60", 2: "#8E44AD"},
+                    labels={"productivity": "Productivité (0–1)", "team_id": ""},
+                    title="Productivité par équipe",
+                )
+                fig2.update_layout(height=max(250, 45 * len(df_chart)), legend_title_text="Level")
+                fig2.update_xaxes(range=[0, 1.05])
+                st.plotly_chart(fig2, use_container_width=True)
+
     # ---- Tab Disponibilités ----
     with tab_avail:
         st.markdown(
@@ -632,6 +689,41 @@ def render_teams_page():
             C.save_table("team_availability", to_save_avail)
             st.success("Disponibilités enregistrées.")
             st.rerun()
+
+        # Heatmap: heures de couverture par équipe × jour de semaine
+        av = C.table("team_availability")
+        if not av.empty and "start_local" in av.columns and "end_local" in av.columns:
+            st.divider()
+            st.markdown("**Couverture horaire par équipe et jour de semaine**")
+
+            def _window_hours(row):
+                try:
+                    sh, sm = map(int, str(row["start_local"]).split(":"))
+                    eh, em = map(int, str(row["end_local"]).split(":"))
+                    start_min = sh * 60 + sm
+                    end_min = eh * 60 + em
+                    if end_min <= start_min:
+                        end_min += 24 * 60
+                    return (end_min - start_min) / 60
+                except Exception:
+                    return 0
+
+            av = av.copy()
+            av["heures"] = av.apply(_window_hours, axis=1)
+            pivot_av = av.pivot_table(index="team_id", columns="dow",
+                                      values="heures", aggfunc="sum", fill_value=0)
+            dow_labels_map = {0: "Lun", 1: "Mar", 2: "Mer", 3: "Jeu",
+                              4: "Ven", 5: "Sam", 6: "Dim"}
+            pivot_av.columns = [dow_labels_map.get(c, str(c)) for c in pivot_av.columns]
+            fig_av = px.imshow(
+                pivot_av, text_auto=".0f",
+                color_continuous_scale="Blues",
+                labels={"color": "Heures/jour"},
+                title="Fenêtres de disponibilité (heures locales/jour par équipe)",
+            )
+            fig_av.update_layout(height=max(250, 50 * len(pivot_av)))
+            st.plotly_chart(fig_av, use_container_width=True)
+            st.caption("Valeurs = nb d'heures de disponibilité sur ce jour de semaine (heure locale).")
 
     # ---- Tab Affectation groupes ----
     with tab_tg:
@@ -733,6 +825,20 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
             st.success("AHT enregistrés.")
             st.rerun()
 
+        # Chart AHT
+        if not df.empty and "aht_seconds" in df.columns:
+            df_chart = df.copy()
+            df_chart["aht_min"] = (df_chart["aht_seconds"] / 60).round(1)
+            df_chart["groupe"] = df_chart["group_id"].fillna("(tous groupes)") if "group_id" in df_chart.columns else "(tous groupes)"
+            fig = px.bar(df_chart.sort_values("aht_seconds"),
+                         x="aht_seconds", y="task_type_id", orientation="h",
+                         color="groupe", text="aht_min",
+                         labels={"aht_seconds": "AHT (s)", "task_type_id": "", "groupe": "Groupe"},
+                         title="AHT par type de tâche (secondes)")
+            fig.update_traces(texttemplate="%{text} min", textposition="outside")
+            fig.update_layout(height=max(250, 55 * len(df_chart)), legend_title_text="Groupe")
+            st.plotly_chart(fig, use_container_width=True)
+
     # ---- Tab SLA ----
     with tab_sla:
         st.markdown("""
@@ -785,3 +891,32 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
             C.save_table("service_params", edited)
             st.success("Objectifs SLA enregistrés.")
             st.rerun()
+
+        # Charts SLA
+        sla_data = C.table("service_params")
+        if not sla_data.empty:
+            sla_data = sla_data.copy()
+            sla_data["label"] = "L" + sla_data["level"].astype(str) + " — " + \
+                sla_data["group_id"].fillna("global") if "group_id" in sla_data.columns else \
+                "L" + sla_data["level"].astype(str)
+            ch1, ch2 = st.columns(2)
+            with ch1:
+                fig_sl = px.bar(sla_data, x="label", y="sl_target",
+                                color="level", text="sl_target",
+                                labels={"label": "", "sl_target": "SLA cible"},
+                                title="SLA cible par configuration",
+                                color_discrete_map={1: "#3498DB", 2: "#E67E22"})
+                fig_sl.update_traces(texttemplate="%{text:.0%}")
+                fig_sl.update_yaxes(range=[0, 1.05], tickformat=".0%")
+                fig_sl.update_layout(height=300, showlegend=False)
+                st.plotly_chart(fig_sl, use_container_width=True)
+            with ch2:
+                fig_sh = px.bar(sla_data, x="label", y="shrinkage",
+                                color="level", text="shrinkage",
+                                labels={"label": "", "shrinkage": "Shrinkage"},
+                                title="Shrinkage par configuration",
+                                color_discrete_map={1: "#3498DB", 2: "#E67E22"})
+                fig_sh.update_traces(texttemplate="%{text:.0%}")
+                fig_sh.update_yaxes(range=[0, 0.6], tickformat=".0%")
+                fig_sh.update_layout(height=300, showlegend=False)
+                st.plotly_chart(fig_sh, use_container_width=True)

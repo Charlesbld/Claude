@@ -344,6 +344,90 @@ def render_erlang():
 # =============================================================================
 # ⑥ COUVERTURE & COÛTS
 # =============================================================================
+def _render_occupancy_by_team(matching: pd.DataFrame, supply_team: pd.DataFrame,
+                               level: int, teams: pd.DataFrame,
+                               service_params: pd.DataFrame):
+    """IMP-2 : tableau occupation réelle vs cible max_occupancy, par équipe."""
+    if supply_team.empty or matching.empty:
+        st.info("Aucune allocation — 0 agents planifiés.")
+        return
+
+    # Cible max_occupancy pour ce level (depuis service_params)
+    sp_level = service_params[service_params["level"] == level]
+    target_occ = float(sp_level["max_occupancy"].iloc[0]) if not sp_level.empty else 0.92
+
+    # Joindre matching (qui a real_occupancy par bucket×level×group_id) avec
+    # supply_team (qui a team_id par bucket) sur (bucket_utc, level, group_id)
+    sup_lv = supply_team[supply_team["level"] == level].copy()
+    if sup_lv.empty:
+        st.info("Aucune donnée d'allocation pour ce level.")
+        return
+
+    match_lv = matching[matching["level"] == level][
+        ["bucket_utc", "level", "group_id", "real_occupancy"]
+    ].copy()
+    # Remplacer inf par NaN pour le calcul de moyenne pondérée
+    match_lv["real_occupancy"] = match_lv["real_occupancy"].replace([np.inf, -np.inf], np.nan)
+
+    # Joindre sur (bucket_utc, level, group_id)
+    joined = sup_lv.merge(match_lv, on=["bucket_utc", "level", "group_id"], how="left")
+    if joined.empty or "real_occupancy" not in joined.columns:
+        st.info("Impossible de calculer l'occupation par équipe (données insuffisantes).")
+        return
+
+    # Moyenne de real_occupancy pondérée par agents
+    joined["occ_x_agents"] = joined["real_occupancy"] * joined["agents"]
+    team_occ = (
+        joined.groupby("team_id")
+        .apply(lambda g: g["occ_x_agents"].sum() / g["agents"].sum()
+               if g["agents"].sum() > 0 else np.nan)
+        .reset_index()
+        .rename(columns={0: "occupation_moyenne"})
+    )
+
+    # Ajouter le label de l'équipe
+    teams_lv = teams[teams["level"] == level][["team_id", "team_label"]].copy()
+    team_occ = team_occ.merge(teams_lv, on="team_id", how="left")
+    team_occ["cible_max_occupancy"] = target_occ
+    team_occ["statut"] = team_occ["occupation_moyenne"].apply(
+        lambda v: "Sur-cible" if (not np.isnan(v) and v > target_occ) else (
+            "Dans la cible" if not np.isnan(v) else "N/A"))
+    team_occ = team_occ.sort_values("occupation_moyenne", ascending=False)
+
+    # Affichage tableau
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        disp = team_occ[["team_id", "team_label", "occupation_moyenne",
+                          "cible_max_occupancy", "statut"]].copy()
+        disp["occupation_moyenne"] = disp["occupation_moyenne"].apply(
+            lambda v: f"{v:.1%}" if not np.isnan(v) else "N/A")
+        disp["cible_max_occupancy"] = disp["cible_max_occupancy"].apply(lambda v: f"{v:.0%}")
+        st.dataframe(disp.rename(columns={
+            "team_id": "Équipe", "team_label": "Libellé",
+            "occupation_moyenne": "Occupation moy.", "cible_max_occupancy": "Cible",
+            "statut": "Statut",
+        }), hide_index=True, use_container_width=True)
+    with col2:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=team_occ["team_id"],
+            y=team_occ["occupation_moyenne"],
+            name="Occupation moy.",
+            marker_color=[
+                "#d7301f" if (not np.isnan(v) and v > target_occ) else "#2c7fb8"
+                for v in team_occ["occupation_moyenne"]
+            ],
+        ))
+        fig.add_hline(y=target_occ, line_dash="dash", line_color="#fdae61",
+                      annotation_text=f"Cible {target_occ:.0%}", annotation_position="top right")
+        fig.update_layout(
+            height=280, margin=dict(l=10, r=10, t=10, b=10),
+            yaxis_tickformat=".0%", yaxis_title="Occupation",
+            xaxis_title="Équipe", showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
 def _local(df):
     df = df.copy()
     df["local"] = df["bucket_utc"].dt.tz_convert(BUSINESS_TZ)
@@ -504,6 +588,12 @@ def render_coverage():
                      .rename(columns={"duration_h": "durée (h)", "max_deficit_fte": "déficit max",
                                       "total_deficit_fte_hours": "déficit cumulé (ETP·h)"}),
                      width="stretch", hide_index=True)
+
+    # --- IMP-2 : Occupation réelle vs cible par équipe -----------------------
+    st.subheader("Occupation réelle vs cible par équipe")
+    st.caption("Taux d'occupation moyen du mois par équipe, comparé à la cible max_occupancy (paramètres SLA).")
+    _render_occupancy_by_team(matching, supply_team, level, C.table("team"),
+                              db.read_table("service_params"))
 
     # --- édition de l'allocation ---------------------------------------------
     st.subheader("✏️ Répartition d'agents (éditable)")

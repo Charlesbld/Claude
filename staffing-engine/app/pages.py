@@ -43,39 +43,41 @@ def _level_color_map(levels) -> dict[str, str]:
             for i, l in enumerate(sorted(int(x) for x in set(levels)))}
 
 
-# Dépendances FK par table — utilisé pour alerter en cas de renommage d'ID.
-_FK_DEPS: dict[str, list[tuple[str, str]]] = {
-    "region":    [("pax_forecast", "region_id"), ("pax_real", "region_id"),
-                  ("contact_rate_forecast", "region_id"), ("tasks_real", "region_id"),
-                  ("group_map", "region_id")],
-    "supply":    [("pax_forecast", "supply_id"), ("pax_real", "supply_id"),
-                  ("contact_rate_forecast", "supply_id"), ("tasks_real", "supply_id"),
-                  ("group_map", "supply_id")],
-    "task_type": [("contact_rate_forecast", "task_type_id"), ("tasks_real", "task_type_id"),
-                  ("param_aht", "task_type_id")],
-    "group":     [("group_map", "group_id"), ("team_group", "group_id"),
-                  ("param_aht", "group_id")],
-    "team":      [("team_availability", "team_id"), ("team_group", "team_id"),
-                  ("allocation", "team_id")],
-}
+def _save_with_cascade(table_name: str, old_df: pd.DataFrame, new_df: pd.DataFrame,
+                       key_col: str) -> None:
+    """Enregistre new_df avec propagation automatique des renommages d'ID en cascade.
 
-
-def _check_key_rename(old_df: pd.DataFrame, new_df: pd.DataFrame,
-                      key_col: str, table_name: str) -> None:
-    """Détecte les IDs supprimés ou renommés et avertit l'utilisateur des FK impactées."""
+    - 1 ID renommé  → cascade automatique vers toutes les tables FK dépendantes.
+    - N IDs renommés simultanément → avertissement (ambigu, faire un par un).
+    - IDs supprimés → avertissement sur les orphelins FK.
+    Dans tous les cas, appelle C.save_table() pour remplacer la table primaire.
+    """
     old_ids = set(old_df[key_col].dropna().astype(str))
     new_ids = set(new_df[key_col].dropna().astype(str))
     removed = old_ids - new_ids
-    if not removed:
-        return
-    deps = _FK_DEPS.get(table_name, [])
-    dep_str = ", ".join(f"`{tbl}.{col}`" for tbl, col in deps) if deps else "tables liées"
-    st.warning(
-        f"⚠️ **IDs supprimés ou renommés** : {', '.join(f'`{x}`' for x in sorted(removed))}. "
-        f"Ces valeurs sont utilisées comme clé étrangère dans : {dep_str}. "
-        "Les lignes orphelines seront ignorées dans les calculs. "
-        "Mettez à jour ces tables ou utilisez **Ingestion CSV** pour ré-importer les données avec le nouvel ID."
-    )
+    added = new_ids - old_ids
+
+    if len(removed) == 1 and len(added) == 1:
+        old_val, new_val = list(removed)[0], list(added)[0]
+        updated = db.cascade_rename_key(table_name, key_col, old_val, new_val)
+        if updated:
+            detail = ", ".join(f"`{t}` ({n} lignes)" for t, _, n in updated)
+            st.success(f"🔁 `{old_val}` → `{new_val}` propagé automatiquement dans : {detail}")
+        else:
+            st.info(f"🔁 `{old_val}` → `{new_val}` : aucune ligne FK à mettre à jour.")
+    elif len(removed) > 1 and len(removed) == len(added):
+        st.warning(
+            f"⚠️ {len(removed)} IDs modifiés simultanément — la propagation en cascade est ambiguë "
+            "pour les renommages multiples. Renommez **un ID à la fois** pour la propagation automatique."
+        )
+    elif removed:
+        deps = db.FK_DEPS.get(table_name, [])
+        dep_str = ", ".join(f"`{t}.{c}`" for t, c in deps) if deps else "tables liées"
+        st.warning(
+            f"⚠️ **IDs supprimés** : {', '.join(f'`{x}`' for x in sorted(removed))}. "
+            f"Les lignes orphelines dans {dep_str} seront ignorées dans les calculs."
+        )
+    C.save_table(table_name, new_df)
 
 
 def _cascade_info(items: list[tuple[str, str]]) -> None:
@@ -1980,8 +1982,7 @@ def render_ref_regions():
             },
         )
         if st.button("💾 Enregistrer les Régions", type="primary", key="save_region"):
-            _check_key_rename(df, edited, "region_id", "region")
-            C.save_table("region", edited)
+            _save_with_cascade("region", df, edited, "region_id")
             st.success("Régions enregistrées.")
             _cascade_info([
                 ("🗺️", "**group_map** — ajouter le mapping Région×Supply→Groupe pour les nouveaux combos (onglet Mapping ci-dessous)"),
@@ -2006,8 +2007,7 @@ def render_ref_regions():
             },
         )
         if st.button("💾 Enregistrer les Modes de transport", type="primary", key="save_supply"):
-            _check_key_rename(df, edited, "supply_id", "supply")
-            C.save_table("supply", edited)
+            _save_with_cascade("supply", df, edited, "supply_id")
             st.success("Modes de transport enregistrés.")
             _cascade_info([
                 ("🗺️", "**group_map** — router ce supply vers un groupe commercial (onglet Mapping ci-dessous)"),
@@ -2113,8 +2113,7 @@ def render_ref_groups():
         },
     )
     if st.button("💾 Enregistrer les Groupes commerciaux", type="primary", key="save_group_page"):
-        _check_key_rename(df, edited, "group_id", "group")
-        C.save_table("group", edited)
+        _save_with_cascade("group", df, edited, "group_id")
         st.success("Groupes commerciaux enregistrés.")
         _cascade_info([
             ("🗺️", "**group_map** — router au moins une combinaison Région×Supply vers ce groupe (Régions → Mapping Groupe×Mois)"),
@@ -2191,8 +2190,7 @@ def render_ref_tasks():
         },
     )
     if st.button("💾 Enregistrer les Types de tâche", type="primary", key="save_task"):
-        _check_key_rename(df, edited, "task_type_id", "task_type")
-        C.save_table("task_type", edited)
+        _save_with_cascade("task_type", df, edited, "task_type_id")
         st.success("Types de tâche enregistrés.")
         _cascade_info([
             ("⏱️", "**param_aht** — définir l'AHT en secondes pour ce type de tâche (Paramètres → AHT par type de tâche)"),
@@ -2292,8 +2290,7 @@ def render_teams_page():
             },
         )
         if st.button("💾 Enregistrer les Équipes", type="primary", key="save_team"):
-            _check_key_rename(df, edited, "team_id", "team")
-            C.save_table("team", edited)
+            _save_with_cascade("team", df, edited, "team_id")
             st.success("Équipes enregistrées.")
             _cascade_info([
                 ("🕐", "**Disponibilités** — définir les fenêtres horaires où cette équipe peut travailler (onglet Disponibilités)"),

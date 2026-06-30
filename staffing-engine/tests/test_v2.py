@@ -494,3 +494,39 @@ def test_read_table_coerces_text_numbers(ctx, tmp_path):
     cov = optimizer.build_coverage(MONTH, dbp)
     assert len(cov["matching"]) > 0
     assert pd.api.types.is_float_dtype(cov["matching"]["real_occupancy"])
+
+
+# --- cascade_rename_key -------------------------------------------------------
+def test_cascade_rename_key(tmp_path):
+    """Renommer un ID dans la table primaire propage l'UPDATE aux tables FK."""
+    import sqlite3
+    dbp = tmp_path / "cascade_test.db"
+    seed_db.main(dbp)
+
+    # Renommer la région FR → FRA
+    updated = db.cascade_rename_key("region", "region_id", "FR", "FRA", dbp)
+
+    # Des lignes ont été mises à jour dans au moins une table FK
+    assert len(updated) > 0, "Aucune table FK mise à jour"
+    updated_tables = [t for t, _, _ in updated]
+    assert "pax_forecast" in updated_tables
+
+    # Aucune ligne FR restante dans les tables FK
+    with sqlite3.connect(dbp) as con:
+        for dep_table, dep_col in db.FK_DEPS["region"]:
+            rows = con.execute(
+                f'SELECT COUNT(*) FROM "{dep_table}" WHERE "{dep_col}" = "FR"'
+            ).fetchone()[0]
+            assert rows == 0, f"FR encore présent dans {dep_table}.{dep_col} après cascade"
+        # FRA doit être présent dans pax_forecast
+        rows_fra = con.execute(
+            'SELECT COUNT(*) FROM "pax_forecast" WHERE "region_id" = "FRA"'
+        ).fetchone()[0]
+        assert rows_fra > 0, "FRA absent de pax_forecast après cascade"
+
+    # La table primaire n'est PAS modifiée par cascade_rename_key (c'est save_table qui le fait)
+    with sqlite3.connect(dbp) as con:
+        rows_fr = con.execute(
+            'SELECT COUNT(*) FROM "region" WHERE "region_id" = "FR"'
+        ).fetchone()[0]
+    assert rows_fr > 0, "cascade_rename_key ne doit pas toucher la table primaire"

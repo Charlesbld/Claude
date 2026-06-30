@@ -165,3 +165,43 @@ def seed(tables: dict[str, pd.DataFrame], db_path: Path | str = DB_PATH) -> None
 
 def db_exists(db_path: Path | str = DB_PATH) -> bool:
     return Path(db_path).exists() and "region" in list_tables(db_path)
+
+
+# Dépendances FK : table primaire → [(table_dépendante, colonne_fk), ...]
+# Source de vérité unique partagée par l'app et les tests.
+FK_DEPS: dict[str, list[tuple[str, str]]] = {
+    "region":    [("pax_forecast", "region_id"), ("pax_real", "region_id"),
+                  ("contact_rate_forecast", "region_id"), ("tasks_real", "region_id"),
+                  ("group_map", "region_id")],
+    "supply":    [("pax_forecast", "supply_id"), ("pax_real", "supply_id"),
+                  ("contact_rate_forecast", "supply_id"), ("tasks_real", "supply_id"),
+                  ("group_map", "supply_id")],
+    "task_type": [("contact_rate_forecast", "task_type_id"), ("tasks_real", "task_type_id"),
+                  ("param_aht", "task_type_id")],
+    "group":     [("group_map", "group_id"), ("team_group", "group_id"),
+                  ("param_aht", "group_id")],
+    "team":      [("team_availability", "team_id"), ("team_group", "team_id"),
+                  ("allocation", "team_id")],
+}
+
+
+def cascade_rename_key(
+    table: str, key_col: str, old_val: str, new_val: str,
+    db_path: Path | str = DB_PATH,
+) -> list[tuple[str, str, int]]:
+    """Propage le renommage old_val → new_val dans toutes les tables FK dépendantes de `table`.
+
+    Ne touche PAS la table primaire : elle sera remplacée intégralement par write_table / save_table.
+    Opération atomique (une seule transaction SQLite).
+    Retourne [(dep_table, dep_col, nb_lignes_mises_à_jour)] pour les tables réellement modifiées.
+    """
+    results = []
+    with connect(db_path) as con:
+        for dep_table, dep_col in FK_DEPS.get(table, []):
+            cur = con.execute(
+                f'UPDATE "{dep_table}" SET "{dep_col}" = ? WHERE "{dep_col}" = ?',
+                (new_val, old_val),
+            )
+            if cur.rowcount:
+                results.append((dep_table, dep_col, cur.rowcount))
+    return results

@@ -173,6 +173,18 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
             for (_s, L, _c) in cand[team] if _s == sid
         )
 
+        # HYPOTHÈSE ARCHITECTURALE : file mutualisée.
+        # Les équipes L2 internes sont supposées traiter n'importe quel groupe au fil de l'eau
+        # (un agent peut passer de DIRECT_AIR à OTA dans le même créneau).
+        # Conséquence : les contraintes de couverture ci-dessous comptent les mêmes agents
+        # pour chaque groupe qu'ils servent → la couverture rapportée est optimiste si en
+        # réalité les groupes sont des files étanches (un agent dédié à un seul groupe).
+        #
+        # POUR CHANGER : si les groupes sont des files ÉTANCHES, remplacer par une variable
+        # x[team, sid, group] avec la contrainte Σ_group x[team,sid,group] = x[team,sid].
+        # Si les groupes sont TOUS mutualisés, pooler la demande avant Erlang C
+        # (un seul appel erlang.required_agents sur la somme des contacts par level×slot).
+
         # Coverage constraints: per (group, level, slot)
         # A team's effective contribution to a group at a slot =
         #   agents_at_slot * productivity (capacity shared across groups).

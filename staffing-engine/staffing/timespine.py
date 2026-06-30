@@ -2,10 +2,7 @@
 
 Colonne vertébrale temporelle du modèle :
   * un index UTC au pas de 15 min (le "time spine") ;
-  * des calendriers PAR PAYS (jours ouvrés / week-ends / fériés) ;
-  * des aides pour charger et manipuler la COURBE DE DÉLAI (lag), c.-à-d. la
-    distribution du temps écoulé entre l'événement générateur (voyage / départ)
-    et l'arrivée effective de la tâche.
+  * des calendriers PAR PAYS (jours ouvrés / week-ends / fériés).
 
 Tout est stocké en UTC. `BUSINESS_TZ` (Europe/Paris) ne sert qu'à l'affichage.
 """
@@ -73,18 +70,3 @@ def build_calendars(regions: pd.DataFrame, start, end) -> pd.DataFrame:
     for country in sorted(regions["country_code"].unique()):
         frames.append(country_calendar(country, start, end))
     return pd.concat(frames, ignore_index=True)
-
-
-def load_lag_curve(path) -> pd.Series:
-    """Courbe de délai normalisée : index = lag en jours (entier, éventuellement
-    négatif pour les contacts pré-voyage), valeur = probabilité (somme = 1)."""
-    s = (
-        pd.read_csv(path)
-        .set_index("lag_days")["weight"]
-        .astype(float)
-        .sort_index()
-    )
-    total = s.sum()
-    if total <= 0:
-        raise ValueError("Courbe de délai vide ou de somme nulle.")
-    return s / total

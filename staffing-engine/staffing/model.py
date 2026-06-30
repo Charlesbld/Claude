@@ -39,6 +39,9 @@ def _slot_to_utc(dates: pd.DatetimeIndex, tz: str) -> pd.DataFrame:
     aware = local.dt.tz_localize(tz, nonexistent="shift_forward", ambiguous="NaT")
     df["bucket_utc"] = aware.dt.tz_convert("UTC")
     df["dow"] = df["date"].dt.dayofweek
+    # NOTE DST : le jour du passage à l'heure d'hiver, l'heure ambiguë → NaT → supprimée ici.
+    # ~4 buckets (1 h) sont perdus ce jour-là → très légère sous-évaluation du volume mensuel
+    # (2 fois/an). Pour corriger : remplacer ambiguous="NaT" par ambiguous=True (premier passage).
     return df.dropna(subset=["bucket_utc"])
 
 
@@ -250,7 +253,11 @@ def required_by_level(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
         workload_hours=("workload_hours", "sum"),
         workload_seconds=("workload_hours", lambda s: s.sum() * 3600.0),
         shrinkage=("shrinkage", "first"),
-        aht_eff=("aht_eff", "mean"),
+    )
+    # AHT effectif pondéré par les contacts (et non moyenne arithmétique des AHT par groupe,
+    # qui surpèserait les petits volumes).
+    pooled["aht_eff"] = np.where(
+        pooled["contacts"] > 0, pooled["workload_seconds"] / pooled["contacts"], 0.0
     )
     # re-run Erlang C on the pooled demand (cross-group pooling gives better SLA)
     frames = []

@@ -1,3 +1,8 @@
+# NOTE SÉCURITÉ — injection de formule Excel : lors de l'implémentation de l'export .xlsx
+# (openpyxl est déjà dans les dépendances), sanitiser les cellules texte dont la valeur
+# commence par =, +, -, @ avant l'écriture (préfixer par une apostrophe ou un espace).
+# Risque limité en usage interne, mais à faire avant tout déploiement partagé.
+
 """F — Restitution.
 
   F1  Heatmap de couverture (time-of-day x jour), par level.
@@ -66,10 +71,10 @@ def cost_fte_summary(demand: pd.DataFrame, supply: pd.DataFrame, matching: pd.Da
         .agg(workload_hours=("workload_hours", "sum"), contacts=("contacts", "sum"))
         .reset_index()
     )
-    # required_agent_hours ≈ workload_hours / (1 - shrinkage), but here we use
-    # workload_hours as a proxy for ranking (demand doesn't carry required_fte directly).
-    required_by_group["required_agent_hours"] = required_by_group["workload_hours"]
-    required_by_group = required_by_group.sort_values("required_agent_hours", ascending=False)
+    # workload_hours_proxy = workload brut (hors marge Erlang et gross-up shrinkage).
+    # Utilisé uniquement pour trier ; ce n'est pas un ETP requis.
+    required_by_group["workload_hours_proxy"] = required_by_group["workload_hours"]
+    required_by_group = required_by_group.sort_values("workload_hours_proxy", ascending=False)
 
     cost_by_team = (
         supply.groupby(["level", "sourcing", "team_id"])

@@ -81,9 +81,23 @@ def _prepare(table: str, raw: pd.DataFrame) -> pd.DataFrame:
     return _coerce_types(raw[cols])
 
 
+def _count_coerce_nans(raw: pd.DataFrame, prepared: pd.DataFrame) -> dict[str, int]:
+    """Compte les valeurs qui ont été converties en NaN par coerce_types (données invalides)."""
+    counts = {}
+    for col in prepared.columns:
+        if col in STRING_COLS:
+            continue
+        nans_after = prepared[col].isna().sum()
+        nans_before = raw[col].isna().sum() if col in raw.columns else 0
+        if nans_after > nans_before:
+            counts[col] = int(nans_after - nans_before)
+    return counts
+
+
 def ingest_frame(table: str, raw: pd.DataFrame, db_path=db.DB_PATH, label: str = "") -> dict:
     """Upsert d'un DataFrame dans une table ; renvoie un rapport d'ingestion."""
     new = _prepare(table, raw)  # valide la table et les colonnes, normalise les types
+    coerce_warnings = _count_coerce_nans(raw, new)
     spec = db.TABLES[table]
     existing = db.read_table(table, db_path) if table in db.list_tables(db_path) else pd.DataFrame()
     before = len(existing)
@@ -91,7 +105,8 @@ def ingest_frame(table: str, raw: pd.DataFrame, db_path=db.DB_PATH, label: str =
     db.write_table(table, merged, db_path)
     replaced = before - (len(merged) - len(new))
     return {"file": label or f"<{table}>", "table": table, "rows_in": len(new),
-            "rows_replaced": int(replaced), "total_after": len(merged)}
+            "rows_replaced": int(replaced), "total_after": len(merged),
+            "coerce_warnings": coerce_warnings}
 
 
 def ingest_file(path, db_path=db.DB_PATH) -> dict:

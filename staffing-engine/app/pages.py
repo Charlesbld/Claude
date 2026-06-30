@@ -3,7 +3,7 @@
 Toutes les pages rendues via st.navigation sont définies ici :
   render_sources · render_demand_monthly · render_demand_profiles · render_demand_buckets
   render_erlang · render_coverage · render_forecast · render_monthly_report
-  render_explorer · render_editor (générique, conservé)
+  render_explorer
   render_ref_regions · render_ref_groups · render_ref_tasks
   render_teams_page · render_params_page · render_glossary
 """
@@ -92,10 +92,24 @@ def render_demand_monthly():
     gmap = C.table("group_map")
     grp = C.table("group")
 
-    base = (pf[pf["month"] == month]
-            .merge(crf[crf["month"] == month], on=["month", "region_id", "supply_id"])
-            .merge(gmap[(gmap["month"] == month) & (gmap["active"] == 1)]
-                   [["region_id", "supply_id", "group_id"]], on=["region_id", "supply_id"])
+    pf_month = pf[pf["month"] == month]
+    crf_month = crf[crf["month"] == month]
+    gmap_month = gmap[(gmap["month"] == month) & (gmap["active"] == 1)][["region_id", "supply_id", "group_id"]]
+
+    # Conservation check : combien de combos (region×supply) du PAX forecast ont un mapping groupe actif ?
+    pax_keys = set(zip(pf_month["region_id"], pf_month["supply_id"]))
+    gmap_keys = set(zip(gmap_month["region_id"], gmap_month["supply_id"]))
+    missing_in_gmap = pax_keys - gmap_keys
+    if missing_in_gmap:
+        st.warning(
+            f"⚠️ {len(missing_in_gmap)} combo(s) région×supply présents dans pax_forecast "
+            f"n'ont pas de mapping groupe actif ce mois-ci et seront ignorés : "
+            f"{sorted(missing_in_gmap)}. Vérifier group_map."
+        )
+
+    base = (pf_month
+            .merge(crf_month, on=["month", "region_id", "supply_id"])
+            .merge(gmap_month, on=["region_id", "supply_id"])
             .merge(grp, on="group_id", how="left"))
     base["contacts"] = base["pax"] * base["contact_rate"]
 
@@ -629,7 +643,8 @@ def render_coverage():
             .reindex(range(96), fill_value=0).reindex(columns=teams_lvl, fill_value=0).reset_index())
     grid["UTC"] = grid["slot_utc"].map(lambda s: f"{s * 15 // 60:02d}:{s * 15 % 60:02d}")
     grid = grid[["UTC"] + teams_lvl]
-    edited = st.data_editor(grid, width="stretch", hide_index=True, height=300, key=f"alloc_{dow}_{level}")
+    edited = st.data_editor(grid, width="stretch", hide_index=True, height=300, key=f"alloc_{dow}_{level}",
+                            disabled=["UTC"])
     if st.button("💾 Enregistrer la répartition", type="primary"):
         e = edited.copy()
         # Reconstituer slot_utc depuis la colonne 'UTC' (format 'HH:MM') pour
@@ -817,6 +832,9 @@ def render_explorer():
 # =============================================================================
 # ÉDITION DES RÉFÉRENTIELS
 # =============================================================================
+# NOTE : _group_map_editor() et _group_map_editor_regions() sont quasi-identiques
+# (même table, même pivot) mais diffèrent sur num_rows et la sélection du group_id.
+# À fusionner en une seule fonction paramétrée si les deux évoluent ensemble.
 def _group_map_editor():
     """Pivot éditable du mapping group : combos (Region×Supply) × mois, actif/inactif."""
     gm = C.table("group_map")
@@ -875,6 +893,8 @@ def _import_section():
                 r = C.ingest_upload(tbl, up, label=up.name)
                 st.success(f"Importé : {r['rows_in']} lignes (remplacées {r['rows_replaced']}, "
                            f"total {r['total_after']}).")
+                for col, n in (r.get("coerce_warnings") or {}).items():
+                    st.warning(f"⚠️ {n} valeur(s) non numérique(s) ignorées (→ NaN) dans la colonne « {col} ».")
                 st.rerun()
             except Exception as exc:
                 st.error(f"Échec de l'import : {exc}")
@@ -887,62 +907,6 @@ def _import_section():
             st.success("Ingestion terminée :")
             st.dataframe(pd.DataFrame(reports), width="stretch", hide_index=True)
             st.rerun()
-
-
-def render_editor():
-    st.header("✏️ Éditer les données")
-    st.markdown("Modifiez directement les tables d'entrée. **« Enregistrer »** écrit en base SQLite "
-                "et recalcule tout. (Les PAX/tâches sont aussi modifiables ici ; voir la page Réel vs Forecast "
-                "pour le contact rate par région×supply.)")
-
-    with st.expander("📥 Importer des fichiers (workflow mensuel)", expanded=False):
-        _import_section()
-
-    name = st.selectbox("Table à éditer", db.EDITABLE,
-                        format_func=lambda n: db.TABLES[n].label)
-    spec = db.TABLES[name]
-    if spec.note:
-        st.info(spec.note)
-    if name == "group_map":
-        _group_map_editor()
-        return
-    if name == "group":
-        st.subheader("Groupes commerciaux")
-        df = C.table("group")
-        edited = st.data_editor(df, width="stretch", hide_index=True, num_rows="dynamic",
-                                key="ed_group",
-                                column_config={
-                                    "group_id": st.column_config.TextColumn("ID groupe (clé)"),
-                                    "group_label": st.column_config.TextColumn("Libellé"),
-                                })
-        if st.button("💾 Enregistrer les groupes", type="primary"):
-            C.save_table("group", edited)
-            st.success("Table « Groupes commerciaux » enregistrée.")
-            st.rerun()
-        return
-    if name == "team_group":
-        st.subheader("Affectation équipes → groupes")
-        teams = C.table("team")[["team_id", "team_label", "level"]]
-        groups = C.table("group")["group_id"].tolist() if not C.table("group").empty else []
-        df = C.table("team_group")
-        edited = st.data_editor(df, width="stretch", hide_index=True, num_rows="dynamic",
-                                key="ed_team_group",
-                                column_config={
-                                    "team_id": st.column_config.SelectboxColumn("Équipe",
-                                                                                options=teams["team_id"].tolist()),
-                                    "group_id": st.column_config.SelectboxColumn("Groupe", options=groups),
-                                })
-        if st.button("💾 Enregistrer l'affectation équipes→groupes", type="primary"):
-            C.save_table("team_group", edited)
-            st.success("Table « Affectation équipes → groupes » enregistrée.")
-            st.rerun()
-        return
-    df = C.table(name)
-    edited = st.data_editor(df, width="stretch", hide_index=True, num_rows="dynamic", key=f"ed_{name}")
-    if st.button("💾 Enregistrer", type="primary"):
-        C.save_table(name, edited)
-        st.success(f"Table « {spec.label} » enregistrée.")
-        st.rerun()
 
 
 # =============================================================================

@@ -46,6 +46,10 @@ def table(name: str) -> pd.DataFrame:
 
 
 def save_table(name: str, df: pd.DataFrame):
+    if df.empty:
+        st.error(f"Impossible d'enregistrer « {name} » : la table est vide. "
+                 "Supprimer toutes les lignes effacerait la table — annulé.")
+        st.stop()
     db.write_table(name, df)
     st.cache_data.clear()
 

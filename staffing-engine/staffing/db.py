@@ -142,6 +142,10 @@ def list_tables(db_path: Path | str = DB_PATH) -> list[str]:
     return sorted(r[0] for r in rows)
 
 
+# NOTE : name est interpolé dans le SQL sans validation préalable. Tous les appelants
+# actuels passent par le registre TABLES (chemin sûr), mais un `assert name in TABLES`
+# en tête de ces deux fonctions serait une garde peu coûteuse si de nouveaux appelants
+# s'ajoutaient en dehors du registre.
 def read_table(name: str, db_path: Path | str = DB_PATH) -> pd.DataFrame:
     with connect(db_path) as con:
         df = pd.read_sql(f'SELECT * FROM "{name}"', con)

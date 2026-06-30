@@ -25,11 +25,491 @@ DIV = "RdYlGn"
 
 
 # =============================================================================
+# BLOCS DE DOCUMENTATION (un par page)
+# Chaque fonction est appelée dans un st.expander depuis la page correspondante.
+# =============================================================================
+
+def _doc_sources():
+    st.markdown("""
+### Rôle de cette page
+Vérifier que toutes les **tables d'entrée** sont bien alimentées avant de lancer les calculs.
+Un chiffre faux ici se propage à toute la chaîne sans aucun message d'erreur.
+""")
+    st.graphviz_chart("""
+digraph {
+    rankdir=LR; bgcolor="transparent";
+    node [shape=box, style=filled, fillcolor="#e8f4f8", fontsize=11];
+    edge [fontsize=10];
+
+    pax  [label="pax_forecast\\n(mois, région, supply)\\n→ pax", fillcolor="#d4edda"];
+    crf  [label="contact_rate_forecast\\n(mois, région, supply, tâche)\\n→ contact_rate", fillcolor="#d4edda"];
+    gmap [label="group_map\\n(mois, région, supply)\\n→ group_id, active", fillcolor="#fff3cd"];
+    grp  [label="group\\n(group_id)\\n→ group_label"];
+    task [label="task_type\\n(task_type_id)\\n→ level (1=L1, 2=L2)"];
+    aht  [label="param_aht\\n(task_type_id, group_id?)\\n→ aht_seconds"];
+    sp   [label="service_params\\n(level, group_id?)\\n→ sl_target, sl_seconds,\\nshrinkage, max_occupancy", fillcolor="#fff3cd"];
+    team [label="team\\n(team_id)\\n→ level, productivity,\\nhourly_cost, timezone, max_agents", fillcolor="#d4edda"];
+    tg   [label="team_group\\n(team_id, group_id)"];
+    avail[label="team_availability\\n(team_id, dow)\\n→ start_local, end_local"];
+    pdow [label="profile_dow\\n(dow)\\n→ weight"];
+    pid  [label="profile_intraday\\n(dow, slot_local)\\n→ weight"];
+
+    pax -> gmap [label="mois×région×supply"];
+    crf -> gmap [label="mois×région×supply"];
+    gmap -> grp [label="group_id"];
+    task -> aht [label="task_type_id"];
+    team -> tg;
+    grp -> tg [label="group_id"];
+    team -> avail;
+    pdow -> pid [label="DOW"];
+}
+""")
+    st.markdown("""
+#### Lecture du schéma
+
+| Table | Clé | Rôle dans le modèle |
+|-------|-----|---------------------|
+| `pax_forecast` | mois × région × supply | Volume de passagers prévu — base de la demande |
+| `contact_rate_forecast` | + tâche | Taux de contact par type de tâche (contacts / PAX) |
+| `group_map` | mois × région × supply | Affectation d'un combo région×supply à un groupe commercial |
+| `task_type` | task_type_id | Niveau de compétence requis (L1 externe ou L2 interne) |
+| `param_aht` | task_type + group_id optionnel | Temps de traitement moyen en secondes |
+| `service_params` | level + group_id optionnel | Objectifs SLA, shrinkage, occupation max |
+| `team` | team_id | Caractéristiques de l'équipe (coût, productivité, fuseau) |
+| `team_group` | team_id × group_id | Quels groupes une équipe peut-elle traiter ? |
+| `team_availability` | team_id × dow | Fenêtres horaires où l'équipe peut travailler (heure locale) |
+| `profile_dow` | dow | Poids relatif de chaque jour de semaine dans le mois |
+| `profile_intraday` | dow × slot_local | Répartition des contacts sur les 96 créneaux de 15 min |
+
+> **Point de vigilance** : `group_map` est la clé de voûte. Si une combinaison
+> région×supply est absente ou `active=0`, toute la demande associée disparaît silencieusement
+> lors des jointures internes. Vérifier le KPI « Conservation » en page ④.
+""")
+
+
+def _doc_demand_monthly():
+    st.markdown("### Formule fondamentale")
+    st.latex(r"""
+\text{contacts}_{m,r,s,t,g} = \text{PAX\_forecast}_{m,r,s} \times \text{contact\_rate\_forecast}_{m,r,s,t}
+""")
+    st.markdown("""
+où :
+- $m$ = mois, $r$ = région, $s$ = supply (mode de transport), $t$ = type de tâche, $g$ = groupe commercial
+- `contact_rate` ∈ [0 ; +∞[ — le nombre moyen de tâches générées par passager pour ce type de tâche
+
+**Chaîne de jointures** (toutes les jointures internes → perte silencieuse si clé manquante) :
+""")
+    st.graphviz_chart("""
+digraph {
+    rankdir=TD; bgcolor="transparent";
+    node [shape=box, style=filled, fillcolor="#e8f4f8", fontsize=11];
+
+    pax  [label="pax_forecast\\n(mois,région,supply)\\nN lignes", fillcolor="#d4edda"];
+    crf  [label="contact_rate_forecast\\n(mois,région,supply,tâche)\\nN×T lignes", fillcolor="#d4edda"];
+    m1   [label="INNER JOIN\\nmois×région×supply\\n→ N×T lignes (pax dupliqué ×T)"];
+    gmap [label="group_map\\n(mois,région,supply,active=1)\\n→ group_id"];
+    m2   [label="INNER JOIN région×supply\\n⚠ lignes sans mapping → perdues"];
+    grp  [label="group\\n→ group_label (LEFT JOIN)"];
+    base [label="base : contacts = pax × contact_rate\\nN×T×G lignes", fillcolor="#fff3cd"];
+
+    pax -> m1; crf -> m1; m1 -> m2; gmap -> m2; m2 -> grp -> base;
+}
+""")
+    st.markdown("""
+#### Précautions sur les KPI affichés
+
+Le `base` DataFrame a **N_task_types copies de chaque valeur pax** (une par tâche).
+Pour les KPI de tête, on dédoublonne avant de sommer :
+
+```
+PAX total     = pax_forecast[month]["pax"].sum()          # avant le merge crf
+Total contacts = base["contacts"].sum()                    # après toutes les jointures
+CR moyen       = Total contacts / PAX total
+```
+
+Sans ce dédoublonnage, `PAX total` serait gonflé d'un facteur égal au nombre de types de tâche.
+
+#### Conservation à vérifier
+La somme `contacts` de cette page doit être **égale** à la somme `contacts_attendus (PAX×CR)`
+affichée en page ④ (KPI « Conservation »). Tout écart révèle une perte en jointure.
+""")
+
+
+def _doc_demand_profiles():
+    st.markdown("""
+### Principe : du mensuel vers les buckets en deux étapes
+
+Le volume mensuel de contacts est ventilé d'abord par **jour de semaine** (profil DOW),
+puis par **créneau de 15 min** (profil intraday), tout en conservant le volume total.
+""")
+    st.graphviz_chart("""
+digraph {
+    rankdir=LR; bgcolor="transparent";
+    node [shape=box, style=filled, fillcolor="#e8f4f8", fontsize=11];
+
+    mensuel [label="contacts_mensuel\\n(par région×supply×tâche×groupe)", fillcolor="#d4edda"];
+    dow     [label="profile_dow\\ndow → weight\\n(normalisé sur les dates du mois)"];
+    jour    [label="contacts_jour(date)\\n= mensuel × shape_dow(date)"];
+    intra   [label="profile_intraday\\n(dow, slot_local) → weight\\n(normalisé par DOW)"];
+    bucket  [label="contacts_bucket(date, slot_local)\\n= contacts_jour × weight_intraday", fillcolor="#fff3cd"];
+    utc     [label="bucket_utc\\n(conversion heure locale → UTC\\npar fuseau de la région)", fillcolor="#fff3cd"];
+
+    mensuel -> jour [label="× shape_dow(date)"];
+    dow -> jour;
+    jour -> bucket [label="× weight_intraday(dow, slot)"];
+    intra -> bucket;
+    bucket -> utc [label="tz_localize + tz_convert"];
+}
+""")
+    st.markdown("#### Étape 1 — Profil jour de semaine")
+    st.latex(r"""
+\text{shape\_dow}(d) = \frac{w_{\text{DOW}}[\text{dayofweek}(d)]}{\sum_{d' \in \text{mois}} w_{\text{DOW}}[\text{dayofweek}(d')]}
+\quad \text{avec} \quad \sum_{d \in \text{mois}} \text{shape\_dow}(d) = 1
+""")
+    st.markdown("""
+**Correction jours fériés (IMP-3)** : pour la région concernée, le poids du jour férié est
+remplacé par le poids du dimanche (`dow=6`), puis l'ensemble est re-normalisé.
+Cela réduit la demande projetée ce jour-là sans altérer le total mensuel.
+""")
+    st.markdown("#### Étape 2 — Profil intraday")
+    st.latex(r"""
+w_{\text{bucket}}(d, s) = \text{shape\_dow}(d) \times \text{weight\_intraday}[\text{DOW}(d), s]
+\quad \text{avec} \quad \sum_{d,s} w_{\text{bucket}}(d, s) = 1
+""")
+    st.markdown("""
+#### Étape 3 — Conversion heure locale → UTC
+Chaque slot local `s` de la date `d` est localisé dans le fuseau de la région, puis converti en UTC :
+```
+bucket_utc = tz_localize(date + s×15min, tz, nonexistent="shift_forward", ambiguous="NaT")
+             .tz_convert("UTC")
+```
+Les créneaux ambigus (changement d'heure d'hiver) → `NaT` → supprimés (~4 buckets perdus 2×/an).
+
+#### Conservation (invariant testé)
+```
+Σ contacts_bucket sur tout le mois = contacts_mensuel  (à l'arrondi flottant près)
+```
+""")
+
+
+def _doc_demand_buckets():
+    st.markdown("""
+### Vue consolidée de la demande à 15 min
+
+Cette page est le **résultat final** de la chaîne forecast → profils → UTC.
+C'est le DataFrame `demand` sur lequel toute la suite (Erlang C, optimiseur, couverture) s'appuie.
+""")
+    st.graphviz_chart("""
+digraph {
+    rankdir=LR; bgcolor="transparent";
+    node [shape=box, style=filled, fillcolor="#e8f4f8", fontsize=11];
+
+    pax   [label="PAX forecast\\n+ contact rate forecast", fillcolor="#d4edda"];
+    prof  [label="Profils DOW\\n+ Intraday\\n+ Jours fériés", fillcolor="#d4edda"];
+    aht   [label="param_aht\\n(AHT en secondes)", fillcolor="#d4edda"];
+    dem   [label="demand\\n(bucket_utc, level, task, group)\\n→ contacts, workload_hours", fillcolor="#fff3cd"];
+    check [label="KPI Conservation\\n∑ contacts = PAX×CR ?"];
+
+    pax -> dem [label="× profils"];
+    prof -> dem;
+    aht -> dem [label="workload"];
+    dem -> check;
+}
+""")
+    st.markdown("#### Champs calculés dans `demand`")
+    st.latex(r"""
+\text{contacts\_bucket}_{b,l,t,g} = \text{contacts\_mensuel}_{r,s,t,g} \times w_{\text{bucket}}(d, \text{slot})
+""")
+    st.latex(r"""
+\text{workload\_hours}_{b,l,t,g} = \text{contacts\_bucket} \times \frac{\text{AHT (secondes)}}{3600}
+""")
+    st.markdown("""
+#### Granularité et clés
+| Clé | Description |
+|-----|-------------|
+| `bucket_utc` | Timestamp UTC, pas de 15 min, timezone-aware |
+| `level` | 1 = L1 externe (BPO), 2 = L2 interne (escalades) |
+| `task_type_id` | Type de tâche (appel entrant, email, remboursement…) |
+| `group_id` | Groupe commercial (DIRECT_AIR, OTA, RAIL…) |
+| `region_id` | Région géographique |
+| `supply_id` | Mode de transport |
+
+#### KPI de conservation
+```
+contacts_attendus = Σ (pax_forecast × contact_rate)   — calcul direct sans profils
+contacts_bucket   = demand["contacts"].sum()            — après application des profils
+Conservation = contacts_bucket / contacts_attendus ≈ 1.0000
+```
+Un écart > 0.1 % révèle un bug dans les profils ou une perte en jointure.
+
+#### AHT par groupe (IMP-4)
+Si `param_aht` contient une colonne `group_id`, la priorité est :
+1. AHT spécifique `(task_type_id, group_id)` — ex. les remboursements DIRECT_AIR sont plus longs
+2. AHT générique `(task_type_id, group_id=NULL)` — fallback pour tous les groupes
+""")
+
+
+def _doc_erlang():
+    st.markdown("""
+### Chaîne de calcul : de la charge à l'ETP requis
+
+Pour chaque bucket (15 min) × level × groupe, Erlang C détermine le nombre minimal d'agents
+*en ligne* pour respecter le SLA, puis un gross-up shrinkage donne les ETP à planifier.
+""")
+    st.graphviz_chart("""
+digraph {
+    rankdir=LR; bgcolor="transparent";
+    node [shape=box, style=filled, fillcolor="#e8f4f8", fontsize=11];
+
+    dem   [label="demand\\ncontacts, workload_hours\\npar bucket×level×group", fillcolor="#d4edda"];
+    pool  [label="Agrégation par\\nbucket×level×group\\n(somme contacts + workload)"];
+    aht   [label="AHT effectif pondéré\\naht_eff = workload_s / contacts"];
+    sp    [label="service_params\\nsl_target, sl_seconds\\nshrinkage, max_occupancy", fillcolor="#d4edda"];
+    erlc  [label="Erlang C\\nbinary search sur N\\ntels que SLA atteint", fillcolor="#fff3cd"];
+    aon   [label="agents_online\\n(agents au combiné)"];
+    gross [label="gross-up shrinkage\\nrequired_fte = agents_online\\n/ (1 − shrinkage)", fillcolor="#fff3cd"];
+
+    dem -> pool -> aht -> erlc;
+    sp -> erlc;
+    erlc -> aon -> gross;
+}
+""")
+    st.markdown("#### Trafic offert (Erlangs)")
+    st.latex(r"""
+A = \frac{\lambda \times \text{AHT}}{\text{INTERVAL}} = \frac{\text{contacts\_bucket}}{\text{900 s}} \times \text{aht\_seconds}
+""")
+    st.markdown("#### Formule Erlang C — probabilité d'attente")
+    st.latex(r"""
+C(N, A) = \frac{\dfrac{A^N}{N!} \cdot \dfrac{N}{N - A}}
+           {\displaystyle\sum_{k=0}^{N-1} \frac{A^k}{k!} + \frac{A^N}{N!} \cdot \frac{N}{N - A}}
+\quad \text{(défini pour } A < N \text{)}
+""")
+    st.markdown("#### Condition SLA")
+    st.latex(r"""
+P(\text{attente} \leq T) = 1 - C(N, A) \cdot e^{-(N - A) \cdot \mu \cdot T} \geq \text{sl\_target}
+\quad \text{avec } \mu = 1 / \text{aht\_seconds}
+""")
+    st.markdown("""
+**Algorithme** : recherche binaire sur $N \\in [\\max(1, \\lceil A \\rceil), N_{\\max}]$.
+À chaque valeur de $N$, on vérifie deux conditions :
+1. La condition SLA ci-dessus (P(attente ≤ T) ≥ sl_target)
+2. La contrainte d'occupation : $A/N \\leq \\text{max\\_occupancy}$ (évite la surcharge)
+
+Si les deux sont satisfaites, $N$ est le `agents_online`.
+
+#### Gross-up shrinkage
+""")
+    st.latex(r"""
+\text{required\_fte} = \frac{\text{agents\_online}}{1 - \text{shrinkage}}
+""")
+    st.markdown("""
+Le `shrinkage` représente la fraction du temps où un agent planifié n'est **pas disponible**
+(pauses, formation, absences, réunions). Un shrinkage de 30 % signifie que 1 ETP planifié
+= 0,70 ETP au combiné → il faut planifier `agents_online / 0,70` ETP.
+
+#### AHT effectif pondéré (après agrégation cross-tâches)
+""")
+    st.latex(r"""
+\text{aht\_eff}_{b,l,g} = \frac{\sum_t \text{workload\_seconds}_{b,l,t,g}}{\sum_t \text{contacts}_{b,l,t,g}}
+""")
+    st.markdown("""
+> **Hypothèse de mutualisaton** : le calcul Erlang C est fait par (level, groupe) séparément.
+> Si une équipe L2 sert plusieurs groupes, les besoins sont calculés indépendamment pour chaque
+> groupe, puis l'optimiseur partage la même équipe entre eux (file mutualisée implicite).
+> Voir le commentaire dans `optimizer.py` pour les implications.
+""")
+
+
+def _doc_coverage():
+    st.markdown("""
+### Formulation du problème d'optimisation (LP entier)
+
+L'optimiseur choisit le nombre d'agents par (équipe, shift) pour couvrir l'ETP requis
+au coût minimal, respectant les disponibilités et le plafond d'effectif.
+""")
+    st.graphviz_chart("""
+digraph {
+    rankdir=TD; bgcolor="transparent";
+    node [shape=box, style=filled, fillcolor="#e8f4f8", fontsize=11];
+
+    req   [label="required_fte\\npar (bucket, level, group)\\n(Erlang C)", fillcolor="#d4edda"];
+    avail [label="team_availability\\nfenêtres de dispo\\n(heure locale → UTC)", fillcolor="#d4edda"];
+    cost  [label="team\\nhourly_cost, productivity\\nmax_agents", fillcolor="#d4edda"];
+    lp    [label="LP entier (PuLP/CBC)\\npar DOW\\nmin Σ coût agents", fillcolor="#fff3cd"];
+    alloc [label="allocation\\n(dow, slot_utc, team_id)\\n→ agents", fillcolor="#fff3cd"];
+    exp   [label="expand_allocation\\nalloc × team_group\\n→ déploiement sur le mois"];
+    cov   [label="build_coverage\\ncoverage_ratio, gap_fte\\nreal_occupancy", fillcolor="#fff3cd"];
+
+    req -> lp [label="contrainte couverture"];
+    avail -> lp [label="shifts valides"];
+    cost -> lp [label="objectif + borne"];
+    lp -> alloc -> exp -> cov;
+    req -> cov [label="required_fte"];
+}
+""")
+    st.markdown("#### Variables de décision")
+    st.latex(r"""
+x_{\text{team}, \text{sid}} \in \mathbb{Z}_{\geq 0}
+\quad \text{: nb d'agents de l'équipe \textit{team} sur le shift \textit{sid}}
+""")
+    st.markdown("""
+Un **shift** `sid` = bloc contigu de `L` buckets (par défaut 24 ou 32 buckets = 6h ou 8h)
+entièrement inclus dans la fenêtre de disponibilité de l'équipe pour ce DOW.
+Les démarrages sont posés sur une grille horaire (`step=4`) pour limiter la symétrie en LP entier.
+""")
+    st.markdown("#### Objectif — coût total minimal")
+    st.latex(r"""
+\min \sum_{\text{team}, \text{sid}} x_{\text{team}, \text{sid}} \times L_{\text{sid}} \times \Delta t \times \text{hourly\_cost}_{\text{team}}
+\quad \text{avec } \Delta t = 0{,}25\,\text{h (bucket)}
+""")
+    st.markdown("#### Contrainte de couverture — par (groupe, level, slot UTC)")
+    st.latex(r"""
+\sum_{\substack{\text{team} \in \mathcal{T}_{g,l} \\ \text{sid} \ni \text{slot}}}
+x_{\text{team}, \text{sid}} \times \text{productivity}_{\text{team}}
+\;\geq\; \text{required\_fte}_{g, l, \text{slot}}
+""")
+    st.markdown("#### Contrainte de capacité — par (équipe, slot UTC)")
+    st.latex(r"""
+\sum_{\text{sid} \ni \text{slot}} x_{\text{team}, \text{sid}} \;\leq\; \text{max\_agents}_{\text{team}}
+\quad \forall (\text{team}, \text{slot})
+""")
+    st.markdown("""
+Cette contrainte globale est la correction **CRIT-1** : elle empêche qu'une équipe soit
+allouée plus que son effectif physique maximal quand elle sert plusieurs groupes.
+
+#### Métriques de couverture post-optimisation
+""")
+    st.latex(r"""
+\text{effective\_capacity}_{\text{bucket}, l, g}
+= \sum_{\text{team} \in \mathcal{T}_{g,l}} x_{\text{team,slot}} \times \text{productivity}_{\text{team}}
+""")
+    st.latex(r"""
+\text{coverage\_ratio} = \frac{\text{effective\_capacity}}{\text{required\_fte}}
+\quad (\geq 1 = \text{couvert},\; < 1 = \text{trou})
+""")
+    st.latex(r"""
+\text{real\_occupancy} = \frac{\text{workload\_hours}}
+{\text{agents} \times \text{productivity} \times (1 - \text{shrinkage}) \times \Delta t}
+""")
+    st.markdown("""
+#### Hypothèse de mutualisation (à revoir si L2 étanche)
+La contrainte de couverture compte les **mêmes agents** pour chaque groupe qu'ils servent.
+Ceci suppose que les agents L2 traitent n'importe quel groupe au fil de l'eau (file mutualisée).
+Si les groupes sont des **files étanches**, il faudrait une variable `x[team, sid, group]`
+avec la contrainte de liaison `Σ_group x[team,sid,group] = x[team,sid]`.
+""")
+
+
+def _doc_forecast():
+    st.markdown("""
+### Décomposition de l'écart tâches Réel vs Forecast
+
+On cherche à expliquer *pourquoi* les tâches réelles diffèrent du forecast :
+est-ce dû aux **volumes PAX** ou au **comportement de contact** (contact rate) ?
+""")
+    st.graphviz_chart("""
+digraph {
+    rankdir=LR; bgcolor="transparent";
+    node [shape=box, style=filled, fillcolor="#e8f4f8", fontsize=11];
+
+    paxf [label="pax_forecast\\n(par mois×région×supply)", fillcolor="#d4edda"];
+    paxr [label="pax_real\\n(indicatif)", fillcolor="#d4edda"];
+    cr_f [label="contact_rate_forecast\\n(taux de contact retenu)", fillcolor="#d4edda"];
+    tasks[label="tasks_real\\n(tâches réelles)", fillcolor="#d4edda"];
+    cr_r [label="CR réel\\n= tasks_real / pax_real"];
+    fc   [label="tasks_forecast\\n= pax_f × CR_f", fillcolor="#fff3cd"];
+    delta[label="Décomposition\\nde l'écart", fillcolor="#fff3cd"];
+
+    paxf -> fc; cr_f -> fc;
+    paxr -> cr_r; tasks -> cr_r;
+    fc -> delta; cr_r -> delta; paxf -> delta; paxr -> delta;
+}
+""")
+    st.markdown("#### Formule de décomposition (exacte, sans résidu)")
+    st.latex(r"""
+\Delta\text{tâches} = \underbrace{(\text{PAX}_r - \text{PAX}_f) \times \text{CR}_f}_{\text{effet PAX}}
++ \underbrace{\text{PAX}_f \times (\text{CR}_r - \text{CR}_f)}_{\text{effet taux}}
++ \underbrace{(\text{PAX}_r - \text{PAX}_f) \times (\text{CR}_r - \text{CR}_f)}_{\text{interaction}}
+""")
+    st.latex(r"""
+\text{Vérification :} \quad \text{effet PAX} + \text{effet taux} + \text{interaction}
+= \text{PAX}_r \times \text{CR}_r - \text{PAX}_f \times \text{CR}_f = \Delta\text{tâches} \quad \checkmark
+""")
+    st.markdown("""
+#### Interprétation
+| Terme | Signification | Action |
+|-------|---------------|--------|
+| `effet_pax > 0` | Plus de passagers que prévu | Revoir le forecast PAX |
+| `effet_taux > 0` | Les clients contactent plus souvent que prévu | Ajuster le contact rate |
+| `interaction` | Croisement des deux effets | Généralement petit, signal de fiabilité |
+
+#### Cas d'usage principal
+Cette page sert à **calibrer le contact rate** mensuel avant de lancer le dimensionnement.
+Un `CR_forecast` bien calé sur l'historique → un dimensionnement juste.
+
+> **Note** : les PAX réels sont ingérés à titre indicatif.
+> Seul le `contact_rate_forecast` (éditable) pilote le dimensionnement.
+""")
+
+
+def _doc_monthly_report():
+    st.markdown("""
+### Rapport mensuel — synthèse des KPI
+
+Ce rapport consolide l'ensemble de la chaîne pour un mois donné, pensé pour être copié-collé
+en comité ou exporté comme référence pour la réplication dans Pigment.
+""")
+    st.graphviz_chart("""
+digraph {
+    rankdir=LR; bgcolor="transparent";
+    node [shape=box, style=filled, fillcolor="#e8f4f8", fontsize=11];
+
+    dem   [label="demand\\n(contacts, workload)"];
+    req   [label="required_fte\\n(Erlang C)"];
+    alloc [label="allocation\\n(agents par équipe)"];
+    match [label="matching\\n(coverage, gaps)"];
+    kpi   [label="KPI consolidés\\ncoût · ETP · couverture\\ncomparatif M vs M-1", fillcolor="#fff3cd"];
+
+    dem -> req -> match;
+    alloc -> match;
+    match -> kpi;
+    dem -> kpi;
+}
+""")
+    st.markdown("""
+#### KPI de tête — définitions exactes
+
+| KPI | Formule | Interprétation |
+|-----|---------|----------------|
+| **Coût total** | `Σ agents × L_shift × Δt × hourly_cost` | Budget de staffing mensuel |
+| **ETP requis (pic)** | `max(required_fte)` | Dimensionnement au créneau le plus chargé |
+| **Capacité effective (pic)** | `max(effective_capacity)` | Pic de production disponible |
+| **% créneaux en trou** | `Σ (required_fte > effective_capacity) / total_buckets` | Taux d'exposition au sous-staffing |
+| **Heures en trou** | `Σ buckets_understaffed × 0,25 h` | Volume horaire sans couverture suffisante |
+| **Occupation p50 / p95** | Médiane / 95e centile de `real_occupancy` | Distribution de la charge agents |
+
+#### Comparatif M vs M-1
+Tous les KPI sont calculés pour le mois courant **et** le mois précédent (si disponible).
+La variation en % est affichée pour détecter les dérives.
+
+#### Pour Pigment
+La structure `by_level` de `reporting.cost_fte_summary()` produit les aggregats exacts
+à reprendre dans Pigment :
+- `total_cost` par level
+- `required_fte_peak` / `required_fte_avg` par level
+- `buckets_understaffed` par level
+- `workload_hours` par group×région (pour l'allocation budgétaire)
+""")
+
+
+# =============================================================================
 # ① Données sources
 # =============================================================================
 def render_sources():
     """① Données sources — aperçu de toutes les tables d'entrée."""
     st.header("📋 ① Données sources")
+    with st.expander("📖 Documentation & formules détaillées", expanded=False):
+        _doc_sources()
     st.markdown("""
     Cette page montre l'état des tables d'entrée du modèle.
     Tout le moteur est piloté par ces données — on peut les modifier dans **Éditer les données**.
@@ -78,6 +558,8 @@ def render_sources():
 def render_demand_monthly():
     """② Contacts mensuels = PAX × contact rate."""
     st.header("✖️ ② Contacts mensuels")
+    with st.expander("📖 Documentation & formules détaillées", expanded=False):
+        _doc_demand_monthly()
     st.markdown(r"""
     **Formule** : `contacts_mensuels = PAX_forecast × contact_rate_forecast`
 
@@ -152,6 +634,8 @@ def render_demand_monthly():
 def render_demand_profiles():
     """③ Profils de répartition — du mensuel vers les buckets 15 min."""
     st.header("📅 ③ Profils de répartition")
+    with st.expander("📖 Documentation & formules détaillées", expanded=False):
+        _doc_demand_profiles()
     st.markdown(r"""
     La demande mensuelle est **découpée** en deux étapes successives :
 
@@ -219,6 +703,8 @@ def render_demand_buckets():
     """④ Demande à 15 min — résultat de la chaîne forecast → buckets UTC."""
     from staffing.timespine import BUSINESS_TZ
     st.header("⏱️ ④ Demande à 15 min")
+    with st.expander("📖 Documentation & formules détaillées", expanded=False):
+        _doc_demand_buckets()
     st.markdown(r"""
     Après application des profils, on obtient la **demande à la maille bucket** (UTC, 15 min).
 
@@ -299,6 +785,8 @@ def render_erlang():
     """⑤ Dimensionnement Erlang C — de la charge à l'ETP requis."""
     from staffing.timespine import BUSINESS_TZ
     st.header("📐 ⑤ Dimensionnement Erlang C")
+    with st.expander("📖 Documentation & formules détaillées", expanded=False):
+        _doc_erlang()
     st.markdown(r"""
     **Erlang C** calcule, pour chaque bucket de 15 min, le **nombre minimal d'agents** pour tenir le SLA.
 
@@ -471,6 +959,8 @@ def _local(df):
 
 def render_coverage():
     st.header("🗓️ ⑥ Couverture & coûts")
+    with st.expander("📖 Documentation & formules détaillées", expanded=False):
+        _doc_coverage()
     month = C.month_selector()
 
     with st.expander("⚙️ Optimiseur de répartition (coût minimal)", expanded=False):
@@ -669,6 +1159,8 @@ def render_coverage():
 # =============================================================================
 def render_forecast():
     st.header("📊 Demande — Réel vs Forecast")
+    with st.expander("📖 Documentation & formules détaillées", expanded=False):
+        _doc_forecast()
     st.markdown(
         "On compare les **PAX** et les **tâches** *réels* (ingérés par CSV, à titre indicatif) "
         "au *forecast* (PAX prévus × **contact rate** retenu). Objectif : voir si un écart vient "
@@ -1026,6 +1518,8 @@ def _build_monthly_report(month: str, prev_month: str | None = None) -> io.Bytes
 def render_monthly_report():
     """Rapport mensuel synthétique exportable (IMP-1)."""
     st.header("📊 Rapport mensuel")
+    with st.expander("📖 Documentation & formules détaillées", expanded=False):
+        _doc_monthly_report()
     st.markdown(
         "Agrégez les KPI clés pour un mois sélectionné et exportez-les en **Excel** (3 onglets : "
         "Synthèse · Comparatif M vs M-1 · Gaps prioritaires)."

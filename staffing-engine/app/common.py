@@ -50,6 +50,34 @@ def table(name: str) -> pd.DataFrame:
     return _read(name, db_version())
 
 
+# --- résolution de libellés --------------------------------------------------
+_LABEL_COLS: dict[str, tuple[str, str]] = {
+    "region":    ("region_id",    "region_label"),
+    "supply":    ("supply_id",    "supply_label"),
+    "task_type": ("task_type_id", "task_type_label"),
+    "group":     ("group_id",     "group_label"),
+    "team":      ("team_id",      "team_label"),
+}
+
+
+@st.cache_data(show_spinner=False)
+def _label_map(tbl: str, id_col: str, lbl_col: str, v: float) -> dict:
+    df = _read(tbl, v)
+    return dict(zip(df[id_col].astype(str), df[lbl_col].astype(str)))
+
+
+def labels(tbl: str) -> dict[str, str]:
+    """Retourne {id: libellé} pour une table de référence. Invalidé à chaque écriture."""
+    id_col, lbl_col = _LABEL_COLS[tbl]
+    return _label_map(tbl, id_col, lbl_col, db_version())
+
+
+def fmt(tbl: str):
+    """Retourne format_func id → 'Libellé (ID)' pour st.selectbox / st.multiselect."""
+    lbl = labels(tbl)
+    return lambda x: f"{lbl.get(str(x), str(x))} ({x})" if x is not None else ""
+
+
 def save_table(name: str, df: pd.DataFrame):
     if df.empty:
         st.error(f"Impossible d'enregistrer « {name} » : la table est vide. "

@@ -23,6 +23,47 @@ from staffing.timespine import BUCKET_HOURS, BUSINESS_TZ
 
 DIV = "RdYlGn"
 
+# Tables de référence → colonne id, colonne label
+_DIM_TABLES = {
+    "region_id":    "region",
+    "supply_id":    "supply",
+    "task_type_id": "task_type",
+    "group_id":     "group",
+    "team_id":      "team",
+}
+
+
+def _dn(df: pd.DataFrame, col: str) -> pd.Series:
+    """Convertit une colonne d'IDs en 'Libellé (ID)' pour l'affichage dans les charts."""
+    tbl = _DIM_TABLES[col]
+    lbl = C.labels(tbl)
+    return df[col].astype(str).map(lambda x: f"{lbl.get(x, x)} ({x})")
+
+
+def _with_dn(df: pd.DataFrame, *cols: str) -> pd.DataFrame:
+    """Ajoute une colonne col+'_dn' 'Libellé (ID)' pour chaque col demandée. Retourne une copie."""
+    df = df.copy()
+    for col in cols:
+        df[col + "_dn"] = _dn(df, col)
+    return df
+
+
+def _editor_opts(tbl: str) -> tuple[list[str], dict[str, str]]:
+    """Retourne (options_affichage, map_inverse) pour SelectboxColumn.
+
+    options_affichage : ["Libellé (ID)", ...]
+    map_inverse       : {"Libellé (ID)": "ID", ...}  — pour mapper après édition
+    """
+    lbl = C.labels(tbl)
+    opts = [f"{v} ({k})" for k, v in lbl.items()]
+    inv  = {f"{v} ({k})": k for k, v in lbl.items()}
+    return opts, inv
+
+
+def _resolve(series: pd.Series, inv: dict) -> pd.Series:
+    """Mappe les valeurs 'Libellé (ID)' vers les IDs bruts après un data_editor."""
+    return series.map(lambda x: inv.get(str(x), x) if pd.notna(x) else x)
+
 
 def _sanitize_excel(df: pd.DataFrame) -> pd.DataFrame:
     """Préfixe d'une apostrophe les cellules texte commençant par = + - @ (injection de formule Excel)."""
@@ -60,11 +101,13 @@ def _save_with_cascade(table_name: str, old_df: pd.DataFrame, new_df: pd.DataFra
     if len(removed) == 1 and len(added) == 1:
         old_val, new_val = list(removed)[0], list(added)[0]
         updated = db.cascade_rename_key(table_name, key_col, old_val, new_val)
-        if updated:
-            detail = ", ".join(f"`{t}` ({n} lignes)" for t, _, n in updated)
-            st.success(f"🔁 `{old_val}` → `{new_val}` propagé automatiquement dans : {detail}")
-        else:
-            st.info(f"🔁 `{old_val}` → `{new_val}` : aucune ligne FK à mettre à jour.")
+        db_detail = ", ".join(f"`{t}` ({n} lignes)" for t, _, n in updated) if updated else "aucune FK"
+        st.success(
+            f"✅ **`{old_val}` → `{new_val}` appliqué partout :**\n\n"
+            f"- 🗄️ **Base de données** : {db_detail}\n"
+            f"- 📄 **Master CSV** : `data/master/{table_name}.csv` mis à jour (survit aux redéploiements)\n"
+            f"- 🖥️ **Interface** : libellés recalculés automatiquement au prochain affichage"
+        )
     elif len(removed) > 1 and len(removed) == len(added):
         st.warning(
             f"⚠️ {len(removed)} IDs modifiés simultanément — la propagation en cascade est ambiguë "
@@ -678,17 +721,20 @@ def render_sources():
     with c1:
         st.subheader("PAX forecast")
         pf = C.table("pax_forecast")
-        d = pf[pf["month"] == month]
-        fig = px.bar(d, x="region_id", y="pax", color="supply_id",
+        d = _with_dn(pf[pf["month"] == month], "region_id", "supply_id")
+        fig = px.bar(d, x="region_id_dn", y="pax", color="supply_id_dn",
+                     labels={"region_id_dn": "Région", "supply_id_dn": "Supply"},
                      title=f"PAX par région × supply — {month}")
         fig.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig, width="stretch")
     with c2:
         st.subheader("Contact rate forecast")
         crf = C.table("contact_rate_forecast")
-        d = crf[crf["month"] == month]
-        fig = px.bar(d, x="task_type_id", y="contact_rate", color="region_id",
-                     barmode="group", title=f"Contact rate par tâche — {month}")
+        d = _with_dn(crf[crf["month"] == month], "task_type_id", "region_id")
+        fig = px.bar(d, x="task_type_id_dn", y="contact_rate", color="region_id_dn",
+                     barmode="group",
+                     labels={"task_type_id_dn": "Type de tâche", "region_id_dn": "Région"},
+                     title=f"Contact rate par tâche — {month}")
         fig.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig, width="stretch")
 
@@ -699,14 +745,21 @@ def render_sources():
         grp = C.table("group")
         d = (gm[(gm["month"] == month) & (gm["active"] == 1)]
              .merge(grp, on="group_id", how="left"))
-        st.dataframe(d[["region_id", "supply_id", "group_id", "group_label"]]
-                     .sort_values(["group_id", "region_id"]),
+        disp = _with_dn(d[["region_id", "supply_id", "group_id", "group_label"]].copy(),
+                        "region_id", "supply_id", "group_id")
+        st.dataframe(disp[["region_id_dn", "supply_id_dn", "group_id_dn"]]
+                     .rename(columns={"region_id_dn": "Région", "supply_id_dn": "Supply",
+                                      "group_id_dn": "Groupe"})
+                     .sort_values(["Groupe", "Région"]),
                      width="stretch", hide_index=True)
     with c4:
         tg = C.table("team_group")
         tm = C.table("team")[["team_id", "team_label", "level"]]
-        d = tg.merge(tm, on="team_id")
-        st.dataframe(d.sort_values(["group_id", "level"]),
+        d = _with_dn(tg.merge(tm, on="team_id"), "group_id", "team_id")
+        st.dataframe(d[["group_id_dn", "team_id_dn", "level"]]
+                     .rename(columns={"group_id_dn": "Groupe", "team_id_dn": "Équipe",
+                                      "level": "Level"})
+                     .sort_values(["Groupe", "Level"]),
                      width="stretch", hide_index=True)
 
 
@@ -767,23 +820,32 @@ def render_demand_monthly():
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Contacts par tâche")
-        d = base.groupby("task_type_id")["contacts"].sum().reset_index()
-        fig = px.bar(d, x="task_type_id", y="contacts", color="task_type_id",
-                     text_auto=".3s")
+        d = _with_dn(base.groupby("task_type_id")["contacts"].sum().reset_index(), "task_type_id")
+        fig = px.bar(d, x="task_type_id_dn", y="contacts", color="task_type_id_dn",
+                     labels={"task_type_id_dn": "Type de tâche"}, text_auto=".3s")
         fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
         st.plotly_chart(fig, width="stretch")
     with c2:
         st.subheader("Contacts par groupe")
-        d = base.groupby(["group_id", "task_type_id"])["contacts"].sum().reset_index()
-        fig = px.bar(d, x="group_id", y="contacts", color="task_type_id")
+        d = _with_dn(base.groupby(["group_id", "task_type_id"])["contacts"].sum().reset_index(),
+                     "group_id", "task_type_id")
+        fig = px.bar(d, x="group_id_dn", y="contacts", color="task_type_id_dn",
+                     labels={"group_id_dn": "Groupe", "task_type_id_dn": "Type de tâche"})
         fig.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), legend_title="")
         st.plotly_chart(fig, width="stretch")
 
     st.subheader("Tableau détaillé")
-    disp = base[["region_id", "supply_id", "group_id", "task_type_id", "pax", "contact_rate", "contacts"]].copy()
+    disp = _with_dn(
+        base[["region_id", "supply_id", "group_id", "task_type_id", "pax", "contact_rate", "contacts"]].copy(),
+        "region_id", "supply_id", "group_id", "task_type_id")
     disp["contacts"] = disp["contacts"].round(0).astype(int)
-    st.dataframe(disp.sort_values(["group_id", "region_id", "task_type_id"]),
-                 width="stretch", hide_index=True)
+    st.dataframe(
+        disp[["region_id_dn", "supply_id_dn", "group_id_dn", "task_type_id_dn",
+              "pax", "contact_rate", "contacts"]]
+        .rename(columns={"region_id_dn": "Région", "supply_id_dn": "Supply",
+                         "group_id_dn": "Groupe", "task_type_id_dn": "Type de tâche"})
+        .sort_values(["Groupe", "Région", "Type de tâche"]),
+        width="stretch", hide_index=True)
 
 
 # =============================================================================
@@ -930,8 +992,9 @@ def render_demand_buckets():
         st.plotly_chart(fig2, width="stretch")
 
     st.subheader("Contribution par groupe")
-    by_grp = sub.groupby("group_id")["contacts"].sum().reset_index()
-    fig3 = px.pie(by_grp, values="contacts", names="group_id", hole=0.4)
+    by_grp = _with_dn(sub.groupby("group_id")["contacts"].sum().reset_index(), "group_id")
+    fig3 = px.pie(by_grp, values="contacts", names="group_id_dn",
+                  labels={"group_id_dn": "Groupe"}, hole=0.4)
     fig3.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig3, width="stretch")
 
@@ -967,7 +1030,8 @@ def render_erlang():
     st.subheader("Paramètres de service")
     st.dataframe(sp, width="stretch", hide_index=True)
 
-    sel_group = st.selectbox("Groupe", sorted(req["group_id"].unique()))
+    sel_group = st.selectbox("Groupe", sorted(req["group_id"].unique()),
+                             format_func=C.fmt("group"))
     sel_level = st.selectbox("Level", sorted(req["level"].unique()),
                              format_func=lambda l: f"Level {l}")
     sub = req[(req["group_id"] == sel_group) & (req["level"] == sel_level)].copy()
@@ -1157,10 +1221,14 @@ def render_coverage():
     level = f[0].selectbox("Level", sorted(matching["level"].unique()),
                            format_func=lambda l: f"Level {l}")
     all_groups = sorted(matching["group_id"].unique())
-    sel_groups = f[1].multiselect("Groupe", all_groups, default=all_groups)
-    dregions = f[2].multiselect("Région", sorted(demand["region_id"].unique()))
-    dsupply = f[3].multiselect("Supply", sorted(demand["supply_id"].unique()))
-    dtasks = f[4].multiselect("Type de tâche", sorted(demand["task_type_id"].unique()))
+    sel_groups = f[1].multiselect("Groupe", all_groups, default=all_groups,
+                                  format_func=C.fmt("group"))
+    dregions = f[2].multiselect("Région", sorted(demand["region_id"].unique()),
+                                format_func=C.fmt("region"))
+    dsupply = f[3].multiselect("Supply", sorted(demand["supply_id"].unique()),
+                               format_func=C.fmt("supply"))
+    dtasks = f[4].multiselect("Type de tâche", sorted(demand["task_type_id"].unique()),
+                              format_func=C.fmt("task_type"))
     gran = f[5].radio("Granularité", ["15 min", "Heure", "Jour"], horizontal=False)
 
     m = _local(matching[matching["level"] == level])
@@ -1235,9 +1303,10 @@ def render_coverage():
     c5, c6 = st.columns(2)
     with c5:
         st.subheader("Agents-heures par équipe et par jour")
-        per = sup_t.groupby(["date", "team_id"])["agents"].sum().reset_index()
+        per = _with_dn(sup_t.groupby(["date", "team_id"])["agents"].sum().reset_index(), "team_id")
         per["agent_h"] = per["agents"] * BUCKET_HOURS
-        fig3 = px.bar(per, x="date", y="agent_h", color="team_id")
+        fig3 = px.bar(per, x="date", y="agent_h", color="team_id_dn",
+                      labels={"team_id_dn": "Équipe"})
         fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), legend_title="", yaxis_title="Agents·h")
         st.plotly_chart(fig3, width="stretch")
     with c6:
@@ -1258,9 +1327,14 @@ def render_coverage():
     if dtasks:
         dd = dd[dd["task_type_id"].isin(dtasks)]
     st.subheader("Contribution à la charge (demande filtrée)")
-    contrib = dd.groupby(["region_id", "supply_id", "task_type_id"])["workload_hours"].sum().reset_index()
-    fig5 = px.bar(contrib.sort_values("workload_hours"), x="workload_hours", y="region_id", color="task_type_id",
-                  orientation="h", hover_data=["supply_id"])
+    contrib = _with_dn(
+        dd.groupby(["region_id", "supply_id", "task_type_id"])["workload_hours"].sum().reset_index(),
+        "region_id", "supply_id", "task_type_id")
+    fig5 = px.bar(contrib.sort_values("workload_hours"), x="workload_hours",
+                  y="region_id_dn", color="task_type_id_dn", orientation="h",
+                  hover_data={"supply_id_dn": True, "region_id_dn": False, "task_type_id_dn": False},
+                  labels={"region_id_dn": "Région", "task_type_id_dn": "Type de tâche",
+                          "supply_id_dn": "Supply"})
     fig5.update_layout(height=300, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Heures de charge", legend_title="")
     st.plotly_chart(fig5, width="stretch")
 
@@ -1293,11 +1367,16 @@ def render_coverage():
     alloc = C.table("allocation")
     teams_lvl = C.table("team")
     teams_lvl = teams_lvl[teams_lvl["level"] == level]["team_id"].tolist()
+    team_lbls = C.labels("team")
+    # En-têtes du tableau : "Libellé (ID)" pour chaque équipe
+    col_display = {tid: f"{team_lbls.get(tid, tid)} ({tid})" for tid in teams_lvl}
+    col_inverse = {v: k for k, v in col_display.items()}
     sub = alloc[(alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl))]
     grid = (sub.pivot_table(index="slot_utc", columns="team_id", values="agents", fill_value=0)
             .reindex(range(96), fill_value=0).reindex(columns=teams_lvl, fill_value=0).reset_index())
     grid["UTC"] = grid["slot_utc"].map(lambda s: f"{s * 15 // 60:02d}:{s * 15 % 60:02d}")
-    grid = grid[["UTC"] + teams_lvl]
+    grid = grid[["UTC"] + teams_lvl].rename(columns=col_display)
+    display_cols = [col_display[t] for t in teams_lvl]
     edited = st.data_editor(grid, width="stretch", hide_index=True, height=300, key=f"alloc_{dow}_{level}",
                             disabled=["UTC"])
     if st.button("💾 Enregistrer la répartition", type="primary"):
@@ -1310,6 +1389,8 @@ def render_coverage():
             e = e.reset_index(drop=True)
             e["UTC"] = e.index.map(lambda i: f"{i * 15 // 60:02d}:{i * 15 % 60:02d}")
         e["slot_utc"] = e["UTC"].map(lambda s: int(s[:2]) * 4 + int(s[3:]) // 15)
+        # Remappe les colonnes "Libellé (ID)" vers les team_id bruts avant le melt
+        e = e.rename(columns=col_inverse)
         long = e.melt(id_vars="slot_utc", value_vars=teams_lvl, var_name="team_id", value_name="agents")
         long = long[long["agents"] > 0]
         long["dow"] = dow
@@ -1339,8 +1420,9 @@ def render_forecast():
     av = C.actuals(C.db_version())
     regions = C.table("region")
     reg = st.selectbox("Région (pays)", sorted(av["region_id"].unique()),
-                       format_func=lambda r: f"{r} — {regions.set_index('region_id').loc[r, 'region_label']}")
-    sup = st.selectbox("Supply", sorted(av[av["region_id"] == reg]["supply_id"].unique()))
+                       format_func=C.fmt("region"))
+    sup = st.selectbox("Supply", sorted(av[av["region_id"] == reg]["supply_id"].unique()),
+                       format_func=C.fmt("supply"))
     sel = av[(av["region_id"] == reg) & (av["supply_id"] == sup)].copy()
 
     # --- décomposition de l'écart de volume (PAX vs contact rate) ------------
@@ -2191,27 +2273,25 @@ def render_ref_groups():
     tg = C.table("team_group")
     teams = C.table("team")[["team_id", "team_label", "level", "sourcing"]]
     if not tg.empty and not teams.empty:
-        tg_merged = tg.merge(teams, on="team_id", how="left")
+        tg_merged = _with_dn(tg.merge(teams, on="team_id", how="left"), "group_id", "team_id")
         st.dataframe(
-            tg_merged.sort_values(["group_id", "level"]),
+            tg_merged[["group_id_dn", "team_id_dn", "level", "sourcing"]]
+            .rename(columns={"group_id_dn": "Groupe", "team_id_dn": "Équipe",
+                             "level": "Level", "sourcing": "Sourcing"})
+            .sort_values(["Groupe", "Level"]),
             hide_index=True, use_container_width=True,
-            column_config={
-                "group_id":   st.column_config.TextColumn("Groupe"),
-                "team_id":    st.column_config.TextColumn("ID équipe"),
-                "team_label": st.column_config.TextColumn("Équipe"),
-                "level":      st.column_config.NumberColumn("Level"),
-                "sourcing":   st.column_config.TextColumn("Sourcing"),
-            },
         )
         st.caption("Pour modifier l'affectation, allez dans **Équipes → Affectation groupes**.")
 
         # Chart: nombre d'équipes par groupe et level
-        count = tg_merged.groupby(["group_id", "level"]).size().reset_index(name="nb_équipes")
+        count = _with_dn(
+            tg_merged.groupby(["group_id", "level"]).size().reset_index(name="nb_équipes"),
+            "group_id")
         count["Level"] = "L" + count["level"].astype(int).astype(str)
         lvl_cmap = _level_color_map(count["level"].unique())
-        fig = px.bar(count, x="group_id", y="nb_équipes", color="Level",
+        fig = px.bar(count, x="group_id_dn", y="nb_équipes", color="Level",
                      barmode="stack",
-                     labels={"group_id": "Groupe commercial", "nb_équipes": "Nb équipes"},
+                     labels={"group_id_dn": "Groupe commercial", "nb_équipes": "Nb équipes"},
                      title="Équipes affectées par groupe commercial",
                      color_discrete_map=lvl_cmap,
                      category_orders={"Level": sorted(lvl_cmap.keys())})
@@ -2284,12 +2364,13 @@ def render_ref_tasks():
         st.dataframe(aht_disp[cols_show], hide_index=True, use_container_width=True, column_config=col_cfg)
 
         # Chart: AHT par type de tâche (moyenne si plusieurs groupes)
-        aht_chart = aht_disp.groupby("task_type_id")["aht_seconds"].mean().reset_index()
+        aht_chart = _with_dn(
+            aht_disp.groupby("task_type_id")["aht_seconds"].mean().reset_index(), "task_type_id")
         aht_chart["aht_min"] = (aht_chart["aht_seconds"] / 60).round(1)
         fig = px.bar(aht_chart.sort_values("aht_seconds", ascending=True),
-                     x="aht_seconds", y="task_type_id", orientation="h",
+                     x="aht_seconds", y="task_type_id_dn", orientation="h",
                      text="aht_min",
-                     labels={"aht_seconds": "AHT (secondes)", "task_type_id": ""},
+                     labels={"aht_seconds": "AHT (secondes)", "task_type_id_dn": ""},
                      title="Temps de traitement moyen par type de tâche",
                      color="aht_seconds", color_continuous_scale="Blues")
         fig.update_traces(texttemplate="%{text} min", textposition="outside")
@@ -2364,17 +2445,17 @@ def render_teams_page():
             ])
 
         # Charts: coût horaire et productivité par équipe
-        df_chart = C.table("team")
+        df_chart = _with_dn(C.table("team"), "team_id")
         if not df_chart.empty:
             st.divider()
             ch1, ch2 = st.columns(2)
             with ch1:
                 fig = px.bar(
                     df_chart.sort_values("hourly_cost"),
-                    x="hourly_cost", y="team_id", orientation="h",
+                    x="hourly_cost", y="team_id_dn", orientation="h",
                     color="sourcing",
                     color_discrete_map={"external": "#3498DB", "internal": "#E67E22"},
-                    labels={"hourly_cost": "Coût horaire (€/h)", "team_id": ""},
+                    labels={"hourly_cost": "Coût horaire (€/h)", "team_id_dn": ""},
                     title="Coût horaire par équipe",
                 )
                 fig.update_layout(height=max(250, 45 * len(df_chart)), legend_title_text="Sourcing")
@@ -2385,9 +2466,9 @@ def render_teams_page():
                 lvl_cmap2 = _level_color_map(df_chart2["level"].unique())
                 fig2 = px.bar(
                     df_chart2.sort_values("productivity"),
-                    x="productivity", y="team_id", orientation="h",
+                    x="productivity", y="team_id_dn", orientation="h",
                     color="Level", color_discrete_map=lvl_cmap2,
-                    labels={"productivity": "Productivité (0–1)", "team_id": ""},
+                    labels={"productivity": "Productivité (0–1)", "team_id_dn": ""},
                     title="Productivité par équipe",
                 )
                 fig2.update_layout(height=max(250, 45 * len(df_chart2)), legend_title_text="Level")
@@ -2415,10 +2496,14 @@ def render_teams_page():
             df_disp.insert(2, "jour", df_disp["dow"].map(dow_map))
         else:
             df_disp = df
-        edited = st.data_editor(
+        avail_team_opts, avail_team_inv = _editor_opts("team")
+        if not df.empty:
+            df_disp["team_id"] = df_disp["team_id"].map(
+                lambda x: f"{C.labels('team').get(str(x),str(x))} ({x})" if pd.notna(x) else x)
+        edited_avail = st.data_editor(
             df_disp, width="stretch", hide_index=True, num_rows="dynamic", key="ed_avail",
             column_config={
-                "team_id":     st.column_config.SelectboxColumn("Équipe", options=team_ids),
+                "team_id":     st.column_config.SelectboxColumn("Équipe", options=avail_team_opts),
                 "dow":         st.column_config.NumberColumn("DOW (0=Lun…6=Dim)",
                                                               min_value=0, max_value=6, step=1),
                 "jour":        st.column_config.TextColumn("Jour (info)", disabled=True),
@@ -2428,6 +2513,8 @@ def render_teams_page():
                                                             help="Ex : 20:00. 00:00 = minuit (fin de journée cyclique)"),
             },
         )
+        edited = edited_avail.copy()
+        edited["team_id"] = _resolve(edited["team_id"], avail_team_inv)
         to_save_avail = edited.drop(columns=["jour"], errors="ignore")
         if st.button("💾 Enregistrer les Disponibilités", type="primary", key="save_avail"):
             C.save_table("team_availability", to_save_avail)
@@ -2462,6 +2549,9 @@ def render_teams_page():
             dow_labels_map = {0: "Lun", 1: "Mar", 2: "Mer", 3: "Jeu",
                               4: "Ven", 5: "Sam", 6: "Dim"}
             pivot_av.columns = [dow_labels_map.get(c, str(c)) for c in pivot_av.columns]
+            # Remplacer les team_id bruts par "Libellé (ID)" en index
+            t_lbls = C.labels("team")
+            pivot_av.index = [f"{t_lbls.get(t, t)} ({t})" for t in pivot_av.index]
             fig_av = px.imshow(
                 pivot_av, text_auto=".0f",
                 color_continuous_scale="Blues",
@@ -2484,29 +2574,43 @@ def render_teams_page():
         group_ids = C.table("group")["group_id"].tolist() if not C.table("group").empty else []
         df = C.table("team_group")
 
+        team_opts, team_inv = _editor_opts("team")
+        group_opts, group_inv = _editor_opts("group")
+
         # Visual matrix (read-only)
         if not df.empty and not team_ids.empty and group_ids:
             st.markdown("**Vue matricielle :**")
+            t_lbls = C.labels("team")
+            g_lbls = C.labels("group")
             matrix = df.assign(v=1).pivot_table(
                 index="team_id", columns="group_id", values="v", fill_value=0,
                 aggfunc="sum",
             ).reset_index()
             matrix = matrix.merge(C.table("team")[["team_id", "level"]], on="team_id", how="left")
-            cols_ord = ["team_id", "level"] + [c for c in matrix.columns if c not in ("team_id", "level")]
-            st.dataframe(matrix[cols_ord], hide_index=True, use_container_width=True)
+            # Renommer lignes et colonnes pour l'affichage
+            matrix["Équipe"] = matrix["team_id"].map(lambda x: f"{t_lbls.get(x,x)} ({x})")
+            matrix = matrix.drop(columns=["team_id"])
+            matrix = matrix.rename(columns={g: f"{g_lbls.get(g,g)} ({g})" for g in group_ids if g in matrix.columns})
+            cols_ord = ["Équipe", "level"] + [c for c in matrix.columns if c not in ("Équipe", "level")]
+            st.dataframe(matrix[cols_ord].rename(columns={"level": "Level"}),
+                         hide_index=True, use_container_width=True)
             st.caption("1 = équipe affectée à ce groupe  ·  0 = non affectée")
             st.divider()
 
         st.markdown("**Éditer (ajouter / supprimer des affectations) :**")
-        edited = st.data_editor(
-            df, width="stretch", hide_index=True, num_rows="dynamic", key="ed_tg",
+        df_disp = df.copy()
+        df_disp["team_id"]  = df_disp["team_id"].map(lambda x: f"{C.labels('team').get(str(x),str(x))} ({x})")
+        df_disp["group_id"] = df_disp["group_id"].map(lambda x: f"{C.labels('group').get(str(x),str(x))} ({x})")
+        edited_disp = st.data_editor(
+            df_disp, width="stretch", hide_index=True, num_rows="dynamic", key="ed_tg",
             column_config={
-                "team_id":  st.column_config.SelectboxColumn("Équipe",
-                                                              options=team_ids["team_id"].tolist()),
-                "group_id": st.column_config.SelectboxColumn("Groupe commercial",
-                                                              options=group_ids),
+                "team_id":  st.column_config.SelectboxColumn("Équipe", options=team_opts),
+                "group_id": st.column_config.SelectboxColumn("Groupe commercial", options=group_opts),
             },
         )
+        edited = edited_disp.copy()
+        edited["team_id"]  = _resolve(edited["team_id"],  team_inv)
+        edited["group_id"] = _resolve(edited["group_id"], group_inv)
         if st.button("💾 Enregistrer l'affectation équipes→groupes", type="primary", key="save_tg"):
             C.save_table("team_group", edited)
             st.success("Affectation enregistrée.")
@@ -2548,20 +2652,26 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
         """)
         st.info("💡 AHT +10 % → charge +10 % → ~10 % d'agents supplémentaires toutes choses égales par ailleurs.")
 
-        task_ids = C.table("task_type")["task_type_id"].tolist() if not C.table("task_type").empty else []
-        group_ids = C.table("group")["group_id"].tolist() if not C.table("group").empty else []
+        task_opts, task_inv = _editor_opts("task_type")
+        group_opts, group_inv = _editor_opts("group")
 
         df = C.table("param_aht")
         df_disp = df.copy()
         if not df_disp.empty and "aht_seconds" in df_disp.columns:
             df_disp["aht_min"] = (df_disp["aht_seconds"] / 60).round(1)
+        # Afficher "Libellé (ID)" dans les colonnes ID
+        t_lbl = C.labels("task_type"); g_lbl = C.labels("group")
+        df_disp["task_type_id"] = df_disp["task_type_id"].map(
+            lambda x: f"{t_lbl.get(str(x),str(x))} ({x})" if pd.notna(x) else x)
+        df_disp["group_id"] = df_disp["group_id"].map(
+            lambda x: f"{g_lbl.get(str(x),str(x))} ({x})" if pd.notna(x) else x)
 
-        edited = st.data_editor(
+        edited_disp = st.data_editor(
             df_disp, width="stretch", hide_index=True, num_rows="dynamic", key="ed_aht",
             column_config={
-                "task_type_id": st.column_config.SelectboxColumn("Type de tâche", options=task_ids),
+                "task_type_id": st.column_config.SelectboxColumn("Type de tâche", options=task_opts),
                 "group_id":     st.column_config.SelectboxColumn("Groupe (vide = tous)",
-                                                                   options=[None] + group_ids),
+                                                                   options=[None] + group_opts),
                 "aht_seconds":  st.column_config.NumberColumn("AHT (secondes)",
                                                                min_value=0, format="%d",
                                                                help="Durée en secondes. Ex : 180 = 3 min"),
@@ -2570,6 +2680,9 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
                                                                help="Colonne calculée — non enregistrée"),
             },
         )
+        edited = edited_disp.copy()
+        edited["task_type_id"] = _resolve(edited["task_type_id"], task_inv)
+        edited["group_id"]     = _resolve(edited["group_id"],     group_inv)
         to_save_aht = edited.drop(columns=["aht_min"], errors="ignore")
         if st.button("💾 Enregistrer les AHT", type="primary", key="save_aht"):
             C.save_table("param_aht", to_save_aht)
@@ -2581,13 +2694,16 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
 
         # Chart AHT
         if not df.empty and "aht_seconds" in df.columns:
-            df_chart = df.copy()
+            df_chart = _with_dn(df.copy(), "task_type_id")
             df_chart["aht_min"] = (df_chart["aht_seconds"] / 60).round(1)
-            df_chart["groupe"] = df_chart["group_id"].fillna("(tous groupes)") if "group_id" in df_chart.columns else "(tous groupes)"
+            g_lbl2 = C.labels("group")
+            df_chart["groupe"] = df_chart["group_id"].map(
+                lambda x: f"{g_lbl2.get(str(x),str(x))} ({x})" if pd.notna(x) else "(tous groupes)"
+            ) if "group_id" in df_chart.columns else "(tous groupes)"
             fig = px.bar(df_chart.sort_values("aht_seconds"),
-                         x="aht_seconds", y="task_type_id", orientation="h",
+                         x="aht_seconds", y="task_type_id_dn", orientation="h",
                          color="groupe", text="aht_min",
-                         labels={"aht_seconds": "AHT (s)", "task_type_id": "", "groupe": "Groupe"},
+                         labels={"aht_seconds": "AHT (s)", "task_type_id_dn": "", "groupe": "Groupe"},
                          title="AHT par type de tâche (secondes)")
             fig.update_traces(texttemplate="%{text} min", textposition="outside")
             fig.update_layout(height=max(250, 55 * len(df_chart)), legend_title_text="Groupe")
@@ -2615,15 +2731,19 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
             "la courbe Erlang C est très non-linéaire à la saturation."
         )
 
-        group_ids = C.table("group")["group_id"].tolist() if not C.table("group").empty else []
+        group_opts_sla, group_inv_sla = _editor_opts("group")
         df = C.table("service_params")
-        edited = st.data_editor(
-            df, width="stretch", hide_index=True, num_rows="dynamic", key="ed_sla",
+        g_lbl3 = C.labels("group")
+        df_sla_disp = df.copy()
+        df_sla_disp["group_id"] = df_sla_disp["group_id"].map(
+            lambda x: f"{g_lbl3.get(str(x),str(x))} ({x})" if pd.notna(x) else x)
+        edited_sla = st.data_editor(
+            df_sla_disp, width="stretch", hide_index=True, num_rows="dynamic", key="ed_sla",
             column_config={
                 "level":         st.column_config.NumberColumn("Level (1 ou 2)",
                                                                 min_value=1, max_value=2, step=1),
                 "group_id":      st.column_config.SelectboxColumn("Groupe (vide = global)",
-                                                                   options=[None] + group_ids),
+                                                                   options=[None] + group_opts_sla),
                 "sl_target":     st.column_config.NumberColumn("SLA cible (0–1)",
                                                                 min_value=0.0, max_value=1.0,
                                                                 step=0.01, format="%.2f",
@@ -2641,6 +2761,8 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
                                                                 help="0.85 = taux d'occupation max toléré"),
             },
         )
+        edited = edited_sla.copy()
+        edited["group_id"] = _resolve(edited["group_id"], group_inv_sla)
         if st.button("💾 Enregistrer les Objectifs SLA", type="primary", key="save_sla"):
             C.save_table("service_params", edited)
             st.success("Objectifs SLA enregistrés.")
@@ -2657,7 +2779,9 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
             sla_data["Level"] = "L" + sla_data["level"].astype(int).astype(str)
             lvl_cmap_sla = _level_color_map(sla_data["level"].unique())
             if "group_id" in sla_data.columns:
-                sla_data["label"] = sla_data["Level"] + " — " + sla_data["group_id"].fillna("global")
+                g_lbl4 = C.labels("group")
+                sla_data["label"] = sla_data["Level"] + " — " + sla_data["group_id"].map(
+                    lambda x: f"{g_lbl4.get(str(x),str(x))} ({x})" if pd.notna(x) else "global")
             else:
                 sla_data["label"] = sla_data["Level"]
             ch1, ch2 = st.columns(2)

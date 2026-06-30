@@ -23,8 +23,6 @@ from staffing.timespine import BUCKET_HOURS, BUSINESS_TZ
 
 DIV = "RdYlGn"
 
-DIV = "RdYlGn"
-
 
 # =============================================================================
 # ① Données sources
@@ -101,10 +99,14 @@ def render_demand_monthly():
             .merge(grp, on="group_id", how="left"))
     base["contacts"] = base["pax"] * base["contact_rate"]
 
+    # PAX total : dédoublonner avant de sommer (pax est dupliqué × nb task_types après merge crf)
+    pax_total = pf[pf["month"] == month]["pax"].sum()
+    contacts_total = base["contacts"].sum()
+    cr_moyen_str = f"{contacts_total / pax_total:.4f}" if pax_total > 0 else "—"
     C.kpi_row([
-        ("Total contacts", f"{base['contacts'].sum():,.0f}"),
-        ("PAX total", f"{base['pax'].sum():,.0f}"),
-        ("CR moyen (toutes tâches)", f"{base['contacts'].sum() / base['pax'].sum():.4f}" if base['pax'].sum() > 0 else "—"),
+        ("Total contacts", f"{contacts_total:,.0f}"),
+        ("PAX total", f"{pax_total:,.0f}"),
+        ("CR moyen (toutes tâches)", cr_moyen_str),
         ("Régions actives", str(base["region_id"].nunique())),
     ])
 
@@ -317,7 +319,7 @@ def render_erlang():
     C.kpi_row([
         ("ETP requis (pic)",    f"{sub['required_fte'].max():.1f}"),
         ("Agents online (pic)", f"{sub['agents_online'].max():.1f}"),
-        ("Shrinkage gross-up",  f"× {1 / (1 - float(sub['shrinkage'].iloc[0])):.2f}"),
+        ("Shrinkage gross-up",  f"× {1 / (1 - min(float(sub['shrinkage'].iloc[0]), 0.9999)):.2f}"),
         ("AHT moyen effectif",  f"{sub['aht_eff'].mean():.0f} s"),
     ])
 
@@ -385,15 +387,23 @@ def _render_occupancy_by_team(matching: pd.DataFrame, supply_team: pd.DataFrame,
         st.info("Impossible de calculer l'occupation par équipe (données insuffisantes).")
         return
 
-    # Moyenne de real_occupancy pondérée par agents
-    joined["occ_x_agents"] = joined["real_occupancy"] * joined["agents"]
-    team_occ = (
-        joined.groupby("team_id")
-        .apply(lambda g: g["occ_x_agents"].sum() / g["agents"].sum()
-               if g["agents"].sum() > 0 else np.nan)
-        .reset_index()
-        .rename(columns={0: "occupation_moyenne"})
-    )
+    # Moyenne de real_occupancy pondérée par agents — exclure les lignes NaN (occ infinie)
+    # des deux côtés pour éviter que le dénominateur soit gonflé par des buckets sans capacité.
+    valid = joined[joined["real_occupancy"].notna()].copy()
+    valid["occ_x_agents"] = valid["real_occupancy"] * valid["agents"]
+    if not valid.empty:
+        g_agg = valid.groupby("team_id").agg(num=("occ_x_agents", "sum"), den=("agents", "sum"))
+        g_agg["occupation_moyenne"] = g_agg["num"] / g_agg["den"].where(g_agg["den"] > 0)
+        computed = g_agg[["occupation_moyenne"]].reset_index()
+    else:
+        computed = pd.DataFrame(columns=["team_id", "occupation_moyenne"])
+    missing_ids = [t for t in joined["team_id"].unique() if t not in computed["team_id"].values]
+    if missing_ids:
+        computed = pd.concat(
+            [computed, pd.DataFrame({"team_id": missing_ids, "occupation_moyenne": np.nan})],
+            ignore_index=True,
+        )
+    team_occ = computed
 
     # Ajouter le label de l'équipe
     teams_lv = teams[teams["level"] == level][["team_id", "team_label"]].copy()

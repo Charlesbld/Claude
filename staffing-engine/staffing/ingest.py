@@ -58,6 +58,7 @@ def _make_key(df: pd.DataFrame, keys: list[str]) -> pd.Series:
 
 def upsert(existing: pd.DataFrame, new: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
     """Remplace dans ``existing`` les lignes dont la clé apparaît dans ``new``, puis concatène."""
+    new = new.drop_duplicates(subset=keys, keep="last")
     if existing.empty:
         return new.reset_index(drop=True)
     new_keys = set(_make_key(new, keys))

@@ -2663,26 +2663,28 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
         t_lbl = C.labels("task_type"); g_lbl = C.labels("group")
         df_disp["task_type_id"] = df_disp["task_type_id"].map(
             lambda x: f"{t_lbl.get(str(x),str(x))} ({x})" if pd.notna(x) else x)
-        df_disp["group_id"] = df_disp["group_id"].map(
-            lambda x: f"{g_lbl.get(str(x),str(x))} ({x})" if pd.notna(x) else x)
+        if "group_id" in df_disp.columns:
+            df_disp["group_id"] = df_disp["group_id"].map(
+                lambda x: f"{g_lbl.get(str(x),str(x))} ({x})" if pd.notna(x) else x)
 
+        _aht_col_cfg = {
+            "task_type_id": st.column_config.SelectboxColumn("Type de tâche", options=task_opts),
+            "aht_seconds":  st.column_config.NumberColumn("AHT (secondes)", min_value=0, format="%d",
+                                                           help="Durée en secondes. Ex : 180 = 3 min"),
+            "aht_min":      st.column_config.NumberColumn("AHT (minutes)", disabled=True, format="%.1f",
+                                                           help="Colonne calculée — non enregistrée"),
+        }
+        if "group_id" in df_disp.columns:
+            _aht_col_cfg["group_id"] = st.column_config.SelectboxColumn(
+                "Groupe (vide = tous)", options=[None] + group_opts)
         edited_disp = st.data_editor(
-            df_disp, width="stretch", hide_index=True, num_rows="dynamic", key="ed_aht",
-            column_config={
-                "task_type_id": st.column_config.SelectboxColumn("Type de tâche", options=task_opts),
-                "group_id":     st.column_config.SelectboxColumn("Groupe (vide = tous)",
-                                                                   options=[None] + group_opts),
-                "aht_seconds":  st.column_config.NumberColumn("AHT (secondes)",
-                                                               min_value=0, format="%d",
-                                                               help="Durée en secondes. Ex : 180 = 3 min"),
-                "aht_min":      st.column_config.NumberColumn("AHT (minutes)",
-                                                               disabled=True, format="%.1f",
-                                                               help="Colonne calculée — non enregistrée"),
-            },
+            df_disp, width="stretch", hide_index=True, num_rows="dynamic",
+            key="ed_aht", column_config=_aht_col_cfg,
         )
         edited = edited_disp.copy()
         edited["task_type_id"] = _resolve(edited["task_type_id"], task_inv)
-        edited["group_id"]     = _resolve(edited["group_id"],     group_inv)
+        if "group_id" in edited.columns:
+            edited["group_id"] = _resolve(edited["group_id"], group_inv)
         to_save_aht = edited.drop(columns=["aht_min"], errors="ignore")
         if st.button("💾 Enregistrer les AHT", type="primary", key="save_aht"):
             C.save_table("param_aht", to_save_aht)

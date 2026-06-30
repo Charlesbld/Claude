@@ -197,7 +197,14 @@ def cascade_rename_key(
     """
     results = []
     with connect(db_path) as con:
+        existing_cols: dict[str, set[str]] = {}
         for dep_table, dep_col in FK_DEPS.get(table, []):
+            # Vérifie que la colonne existe (certaines colonnes sont optionnelles, ex. group_id dans param_aht)
+            if dep_table not in existing_cols:
+                rows = con.execute(f'PRAGMA table_info("{dep_table}")').fetchall()
+                existing_cols[dep_table] = {r[1] for r in rows}
+            if dep_col not in existing_cols.get(dep_table, set()):
+                continue
             cur = con.execute(
                 f'UPDATE "{dep_table}" SET "{dep_col}" = ? WHERE "{dep_col}" = ?',
                 (new_val, old_val),

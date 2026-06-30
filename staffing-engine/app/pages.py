@@ -523,6 +523,37 @@ def render_sources():
     Cette page montre l'état des tables d'entrée du modèle.
     Tout le moteur est piloté par ces données — on peut les modifier dans **Éditer les données**.
     """)
+
+    with st.expander("📁 Où modifier chaque référentiel ?", expanded=False):
+        st.markdown("""
+| Référentiel | Édition **dans l'app** | Édition **dans le code** (seed initial) |
+|-------------|------------------------|------------------------------------------|
+| **Régions** (`region`) | Éditer les données → Régions | `scripts/seed_db.py` → `REGIONS` (ligne ~28) |
+| **Modes de transport** (`supply`) | Éditer les données → Supply | `scripts/seed_db.py` → `SUPPLIES` (ligne ~32) |
+| **Types de tâche** (`task_type`) | Éditer les données → Types de tâche | `scripts/seed_db.py` → `TASK_TYPES` (ligne ~35) |
+| **Groupes commerciaux** (`group`) | Éditer les données → Groupes | `scripts/seed_db.py` → `GROUPS` (ligne ~39) |
+| **Mapping groupe** (`group_map`) | Éditer les données → Mapping Group | `scripts/seed_db.py` → `REGION_GROUP_SUPPLY` (ligne ~47) |
+| **Équipes** (`team`) | Éditer les données → Équipes | `scripts/seed_db.py` → `TEAMS` (ligne ~55) |
+| **Disponibilités équipes** (`team_availability`) | Éditer les données → Disponibilités | `scripts/seed_db.py` → `AVAILABILITY` (ligne ~65) |
+| **Affectation équipes→groupes** (`team_group`) | Éditer les données → Affectation | `scripts/seed_db.py` → `TEAM_GROUP` (ligne ~70) |
+| **AHT** (`param_aht`) | Éditer les données → AHT | `scripts/seed_db.py` → `TASK_TYPES` colonne `aht_seconds` |
+| **Objectifs SLA** (`service_params`) | Éditer les données → Objectifs SLA | `scripts/seed_db.py` → `SERVICE_PARAMS` (ligne ~84) |
+| **Profil DOW** (`profile_dow`) | Éditer les données → Profil DOW | `scripts/seed_db.py` → `profile_dow` (ligne ~178) |
+| **Profil intraday** (`profile_intraday`) | Éditer les données → Profil intraday | `scripts/seed_db.py` → `_intraday()` (ligne ~92) |
+
+**Données mensuelles (CSV)** — déposer dans `data/incoming/` avec le format `<table>__<mois>.csv` :
+
+| Fichier | Table cible | Exemple |
+|---------|-------------|---------|
+| `pax_forecast__2026-08.csv` | `pax_forecast` | Colonnes : `month, region_id, supply_id, pax` |
+| `pax_real__2026-07.csv` | `pax_real` | Colonnes : `month, region_id, supply_id, pax` |
+| `contact_rate_forecast__2026-08.csv` | `contact_rate_forecast` | Colonnes : `month, region_id, supply_id, task_type_id, contact_rate` |
+| `tasks_real__2026-07.csv` | `tasks_real` | Colonnes : `month, region_id, supply_id, task_type_id, tasks` |
+| `group_map__2026-08.csv` | `group_map` | Colonnes : `month, region_id, supply_id, group_id, active` |
+
+> Les **templates CSV** avec les bons en-têtes sont disponibles dans `data/templates/`.
+""")
+
     month = C.month_selector()
 
     c1, c2 = st.columns(2)

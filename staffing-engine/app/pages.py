@@ -78,6 +78,71 @@ def _save_with_cascade(table_name: str, old_df: pd.DataFrame, new_df: pd.DataFra
             f"Les lignes orphelines dans {dep_str} seront ignorées dans les calculs."
         )
     C.save_table(table_name, new_df)
+    if added - removed:  # IDs vraiment nouveaux (pas des renames)
+        _auto_populate_deps(table_name, added - removed)
+
+
+def _auto_populate_deps(table_name: str, new_ids: set[str]) -> None:
+    """Pré-remplit les tables dépendantes quand de nouveaux IDs sont ajoutés."""
+    if table_name in ("region", "supply"):
+        _autopop_group_map(table_name, new_ids)
+    elif table_name == "task_type":
+        _autopop_param_aht(new_ids)
+    elif table_name == "group":
+        id_str = ", ".join(f"`{x}`" for x in sorted(new_ids))
+        st.info(
+            f"✨ Nouveau(x) groupe(s) {id_str} créé(s). "
+            "**Prochaine étape** : aller dans *Équipes → Affectation équipes→groupes* "
+            "pour affecter au moins une équipe à ce groupe, puis relancer l'optimiseur."
+        )
+
+
+def _autopop_group_map(dim: str, new_ids: set[str]) -> None:
+    """Crée des entrées group_map (active=0) pour chaque nouveau region_id ou supply_id."""
+    gmap = C.table("group_map")
+    months = sorted(C.table("pax_forecast")["month"].unique())
+    regions = C.table("region")["region_id"].tolist()
+    supplies = C.table("supply")["supply_id"].tolist()
+    groups = C.table("group")["group_id"].tolist()
+    default_group = groups[0] if groups else None
+
+    existing = set(zip(gmap["month"], gmap["region_id"], gmap["supply_id"]))
+    new_rows = []
+    for new_id in new_ids:
+        others = supplies if dim == "region" else regions
+        for month in months:
+            for other in others:
+                reg, sup = (new_id, other) if dim == "region" else (other, new_id)
+                if (month, reg, sup) not in existing:
+                    new_rows.append({"month": month, "region_id": reg, "supply_id": sup,
+                                     "group_id": default_group, "active": 0})
+    if new_rows:
+        updated = pd.concat([gmap, pd.DataFrame(new_rows)], ignore_index=True)
+        db.write_table("group_map", updated)
+        st.cache_data.clear()
+        label = "région" if dim == "region" else "supply"
+        st.info(
+            f"✨ **{len(new_rows)} lignes** créées dans `group_map` pour le nouveau {label} "
+            f"(active=0, groupe=`{default_group}`). "
+            "Allez dans *Référentiels → Mapping* pour activer les combos voulus et choisir le bon groupe."
+        )
+
+
+def _autopop_param_aht(new_task_ids: set[str]) -> None:
+    """Crée une ligne param_aht avec AHT=300s pour chaque nouveau task_type_id."""
+    aht = C.table("param_aht")
+    existing = set(aht["task_type_id"].astype(str))
+    new_rows = [{"task_type_id": t, "group_id": None, "aht_seconds": 300}
+                for t in new_task_ids if t not in existing]
+    if new_rows:
+        updated = pd.concat([aht, pd.DataFrame(new_rows)], ignore_index=True)
+        db.write_table("param_aht", updated)
+        st.cache_data.clear()
+        id_str = ", ".join(f"`{r['task_type_id']}`" for r in new_rows)
+        st.info(
+            f"✨ AHT par défaut (300 s) créé pour : {id_str}. "
+            "Ajustez dans *Paramètres → AHT par type de tâche* si besoin."
+        )
 
 
 def _cascade_info(items: list[tuple[str, str]]) -> None:

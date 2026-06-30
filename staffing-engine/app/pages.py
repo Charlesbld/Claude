@@ -55,6 +55,8 @@ _FK_DEPS: dict[str, list[tuple[str, str]]] = {
                   ("param_aht", "task_type_id")],
     "group":     [("group_map", "group_id"), ("team_group", "group_id"),
                   ("param_aht", "group_id")],
+    "team":      [("team_availability", "team_id"), ("team_group", "team_id"),
+                  ("allocation", "team_id")],
 }
 
 
@@ -1247,7 +1249,10 @@ def render_coverage():
         keep = alloc[~((alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl)))]
         C.save_table("allocation", pd.concat([keep, long[["dow", "slot_utc", "team_id", "agents"]]], ignore_index=True))
         st.success("Répartition enregistrée.")
-        st.rerun()
+        _cascade_info([
+            ("📊", "La couverture (heatmap, KPI, gaps) se recalcule automatiquement depuis cette allocation — pas besoin de relancer l'optimiseur"),
+            ("⚠️", "Cette allocation manuelle **remplace** l'optimiseur sur ce jour. Pour revenir à l'optimisation, relancer l'optimiseur (bouton ci-dessus)"),
+        ])
 
 
 # =============================================================================
@@ -1328,7 +1333,10 @@ def render_forecast():
         keep = crf[~((crf["region_id"] == reg) & (crf["supply_id"] == sup))]
         C.save_table("contact_rate_forecast", pd.concat([keep, long[crf.columns]], ignore_index=True))
         st.success("Contact rate mis à jour.")
-        st.rerun()
+        _cascade_info([
+            ("📊", "Le contact rate mis à jour change les **contacts mensuels** (page ② se recalcule automatiquement)"),
+            ("🚀", "**Relancer l'optimiseur** pour que l'allocation reflète la nouvelle demande (page ⑥ Couverture)"),
+        ])
 
 
 # =============================================================================
@@ -1454,7 +1462,11 @@ def _group_map_editor():
         long["active"] = long["active"].fillna(False).astype(int)
         C.save_table("group_map", long[cols_order])
         st.success("Mapping group enregistré.")
-        st.rerun()
+        _cascade_info([
+            ("🗺️", "Le mapping détermine dans quel **groupe commercial** va la demande de chaque Région×Supply — les pages ②→⑥ se recalculent automatiquement"),
+            ("⚠️", "Un combo Région×Supply non mappé (ou `active=0`) **disparaît silencieusement** de la demande — vérifier le KPI Conservation en page ④"),
+            ("🚀", "**Relancer l'optimiseur** si l'activation/désactivation change la demande à couvrir (page ⑥ Couverture)"),
+        ])
 
 
 def _import_section():
@@ -2058,7 +2070,10 @@ def _group_map_editor_regions():
                              "active": int(bool(r[m]))})
         C.save_table("group_map", pd.DataFrame(rows))
         st.success("Mapping Groupe enregistré.")
-        st.rerun()
+        _cascade_info([
+            ("⚠️", "Un combo Région×Supply non mappé **disparaît de la demande** — vérifier le KPI Conservation en page ④"),
+            ("🚀", "**Relancer l'optimiseur** pour que l'allocation reflète les changements de routage (page ⑥ Couverture)"),
+        ])
 
 
 def render_ref_groups():
@@ -2277,9 +2292,14 @@ def render_teams_page():
             },
         )
         if st.button("💾 Enregistrer les Équipes", type="primary", key="save_team"):
+            _check_key_rename(df, edited, "team_id", "team")
             C.save_table("team", edited)
             st.success("Équipes enregistrées.")
-            st.rerun()
+            _cascade_info([
+                ("🕐", "**Disponibilités** — définir les fenêtres horaires où cette équipe peut travailler (onglet Disponibilités)"),
+                ("🔗", "**Affectation groupes** — indiquer quels groupes commerciaux cette équipe traite (onglet Affectation groupes)"),
+                ("🚀", "**Relancer l'optimiseur** — la nouvelle équipe sera prise en compte dans l'allocation (page ⑥ Couverture)"),
+            ])
 
         # Charts: coût horaire et productivité par équipe
         df_chart = C.table("team")
@@ -2350,7 +2370,10 @@ def render_teams_page():
         if st.button("💾 Enregistrer les Disponibilités", type="primary", key="save_avail"):
             C.save_table("team_availability", to_save_avail)
             st.success("Disponibilités enregistrées.")
-            st.rerun()
+            _cascade_info([
+                ("🚀", "**Relancer l'optimiseur** — les nouvelles fenêtres de disponibilité changent les shifts candidats (page ⑥ Couverture)"),
+                ("💡", "Si une équipe n'a aucune disponibilité ce jour, elle ne sera pas allouée ce jour-là"),
+            ])
 
         # Heatmap: heures de couverture par équipe × jour de semaine
         av = C.table("team_availability")
@@ -2425,7 +2448,11 @@ def render_teams_page():
         if st.button("💾 Enregistrer l'affectation équipes→groupes", type="primary", key="save_tg"):
             C.save_table("team_group", edited)
             st.success("Affectation enregistrée.")
-            st.rerun()
+            _cascade_info([
+                ("🚀", "**Relancer l'optimiseur** — l'affectation groupes pilote quelles équipes couvrent quelle demande (page ⑥ Couverture)"),
+                ("⚠️", "Une équipe L1 sans groupe affecté ne sera jamais allouée par l'optimiseur"),
+                ("📐", "Les équipes L2 mutualisées doivent couvrir **tous** les groupes qu'elles escaladent"),
+            ])
 
 
 # =============================================================================
@@ -2485,7 +2512,10 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
         if st.button("💾 Enregistrer les AHT", type="primary", key="save_aht"):
             C.save_table("param_aht", to_save_aht)
             st.success("AHT enregistrés.")
-            st.rerun()
+            _cascade_info([
+                ("⏱️", "L'AHT impacte le **workload** (contacts × AHT) et donc l'ETP Erlang C — les pages ④ et ⑤ se recalculent automatiquement"),
+                ("🚀", "**Relancer l'optimiseur** si vous voulez que l'allocation reflète le nouvel AHT (page ⑥ Couverture)"),
+            ])
 
         # Chart AHT
         if not df.empty and "aht_seconds" in df.columns:
@@ -2552,7 +2582,11 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
         if st.button("💾 Enregistrer les Objectifs SLA", type="primary", key="save_sla"):
             C.save_table("service_params", edited)
             st.success("Objectifs SLA enregistrés.")
-            st.rerun()
+            _cascade_info([
+                ("📐", "Les paramètres SLA (sl_target, sl_seconds, shrinkage, max_occupancy) alimentent directement Erlang C — l'ETP requis se recalcule automatiquement (page ⑤)"),
+                ("🚀", "**Relancer l'optimiseur** pour que l'allocation tienne compte des nouveaux objectifs (page ⑥ Couverture)"),
+                ("💡", "Une ligne avec `group_id` vide s'applique à **tous les groupes** de ce level (fallback) — une ligne spécifique a la priorité"),
+            ])
 
         # Charts SLA
         sla_data = C.table("service_params")

@@ -21,6 +21,25 @@ sys.path.insert(0, str(ROOT))
 from staffing import db  # noqa: E402
 from staffing.timespine import BUCKETS_PER_DAY  # noqa: E402
 
+MASTER_DIR = ROOT / "data" / "master"
+
+
+def _load_master(name: str, default_df: pd.DataFrame) -> pd.DataFrame:
+    """Retourne le CSV master s'il existe, sinon retourne default_df ET l'écrit (bootstrap).
+
+    À chaque lancement de seed_db, les tables de référence sont chargées depuis
+    data/master/<name>.csv si ce fichier est présent — ce qui garantit que les
+    renommages effectués dans l'UI (et auto-exportés vers ce dossier) survivent
+    aux redéploiements. Lors du premier lancement (pas de CSV), on écrit les CSVs
+    à partir des constantes Python pour initialiser le dossier master.
+    """
+    path = MASTER_DIR / f"{name}.csv"
+    if path.exists():
+        return pd.read_csv(path)
+    MASTER_DIR.mkdir(parents=True, exist_ok=True)
+    default_df.to_csv(path, index=False)
+    return default_df
+
 SEED = 42
 MONTHS = [f"2026-{m:02d}" for m in range(1, 13)]
 REAL_MONTHS = [f"2026-{m:02d}" for m in range(1, 7)]  # jan→juin : actuals connus
@@ -111,16 +130,19 @@ def main(db_path=None) -> None:
     supply_share = {s: sh for s, _, sh in SUPPLIES}
     mfac = dict(zip(MONTHS, MONTH_FACTOR))
 
-    region = pd.DataFrame([(r, lbl, cc, tz) for r, lbl, cc, tz, _ in REGIONS],
-                          columns=["region_id", "region_label", "country_code", "timezone"])
-    supply = pd.DataFrame([(s, lbl) for s, lbl, _ in SUPPLIES], columns=["supply_id", "supply_label"])
-    task_type = pd.DataFrame([(t, lbl, lvl) for t, lbl, lvl, _, _ in TASK_TYPES],
-                             columns=["task_type_id", "task_type_label", "level"])
-
-    # group reference table
-    group = pd.DataFrame(GROUPS, columns=["group_id", "group_label"])
+    region = _load_master("region", pd.DataFrame(
+        [(r, lbl, cc, tz) for r, lbl, cc, tz, _ in REGIONS],
+        columns=["region_id", "region_label", "country_code", "timezone"]))
+    supply = _load_master("supply", pd.DataFrame(
+        [(s, lbl) for s, lbl, _ in SUPPLIES], columns=["supply_id", "supply_label"]))
+    task_type = _load_master("task_type", pd.DataFrame(
+        [(t, lbl, lvl) for t, lbl, lvl, _, _ in TASK_TYPES],
+        columns=["task_type_id", "task_type_label", "level"]))
+    group = _load_master("group", pd.DataFrame(GROUPS, columns=["group_id", "group_label"]))
 
     # group_map : (month, region, supply) actifs -> group_id (from REGION_GROUP_SUPPLY)
+    # Non chargé depuis master : dépend des IDs région/supply courants du master,
+    # la table group_map elle-même est éditée via l'UI et persistée dans la DB.
     gm = []
     for month in MONTHS:
         for reg, sup_groups in REGION_GROUP_SUPPLY.items():
@@ -166,25 +188,30 @@ def main(db_path=None) -> None:
 
     param_aht = pd.DataFrame([(t, aht) for t, _, _, _, aht in TASK_TYPES],
                              columns=["task_type_id", "aht_seconds"])
-    team = pd.DataFrame(TEAMS, columns=["team_id", "team_label", "level", "sourcing",
-                                        "country_code", "timezone", "productivity", "hourly_cost", "max_agents"])
-    avail = []
+
+    _default_team = pd.DataFrame(TEAMS, columns=["team_id", "team_label", "level", "sourcing",
+                                                  "country_code", "timezone", "productivity",
+                                                  "hourly_cost", "max_agents"])
+    team = _load_master("team", _default_team)
+
+    _default_avail = []
     for tid, start, end in AVAILABILITY:
         for dow in range(7):
             if tid == "INT_PARIS" and dow >= 5:  # interne : pas de week-end
                 continue
-            avail.append({"team_id": tid, "dow": dow, "start_local": start, "end_local": end})
-    team_availability = pd.DataFrame(avail)
+            _default_avail.append({"team_id": tid, "dow": dow, "start_local": start, "end_local": end})
+    team_availability = _load_master("team_availability", pd.DataFrame(_default_avail))
+
     profile_dow = pd.DataFrame({"dow": range(7), "weight": [0.85, 0.80, 0.85, 0.95, 1.30, 1.45, 1.15]})
 
-    team_group = pd.DataFrame(TEAM_GROUP, columns=["team_id", "group_id"])
+    team_group = _load_master("team_group", pd.DataFrame(TEAM_GROUP, columns=["team_id", "group_id"]))
 
     db.seed({
         "region": region, "supply": supply, "task_type": task_type,
         "group": group, "group_map": group_map,
         "pax_real": pax_real, "pax_forecast": pax_forecast, "tasks_real": tasks_real,
         "contact_rate_forecast": contact_rate_forecast, "param_aht": param_aht,
-        "service_params": pd.DataFrame(SERVICE_PARAMS), "team": team,
+        "service_params": _load_master("service_params", pd.DataFrame(SERVICE_PARAMS)), "team": team,
         "team_availability": team_availability,
         "team_group": team_group,
         "profile_dow": profile_dow,

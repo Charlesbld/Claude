@@ -1,0 +1,3 @@
+level,group_id,sl_target,sl_seconds,shrinkage,max_occupancy
+1,,0.95,120,0.3,0.92
+2,,0.9,300,0.28,0.88

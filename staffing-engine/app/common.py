@@ -14,6 +14,11 @@ from staffing import db, ingest, model, optimizer, reporting  # noqa: E402
 from staffing.timespine import BUSINESS_TZ  # noqa: E402
 
 DB_PATH = db.DB_PATH
+MASTER_DIR = ROOT / "data" / "master"
+
+# Tables dont l'état doit survivre à un redéploiement : seed_db.py les relit depuis MASTER_DIR.
+_MASTER_TABLES = {"region", "supply", "task_type", "group", "team",
+                  "team_availability", "team_group", "service_params"}
 
 
 # --- amorçage ----------------------------------------------------------------
@@ -73,6 +78,10 @@ def save_table(name: str, df: pd.DataFrame):
             f"de « {name} » : {nan_gains}. Vérifiez ces cellules."
         )
     db.write_table(name, df)
+    # Auto-export master data so renames survive redeploys (seed_db.py reads these CSVs).
+    if name in _MASTER_TABLES:
+        MASTER_DIR.mkdir(parents=True, exist_ok=True)
+        df.to_csv(MASTER_DIR / f"{name}.csv", index=False)
     st.cache_data.clear()
 
 

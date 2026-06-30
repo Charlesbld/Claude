@@ -1,0 +1,4 @@
+task_type_id,task_type_label,level
+GEN_INQUIRY,Demande générale,1
+MODERATION,Modération,1
+COMPLEX_CASE,Dossier complexe (escalade),2

@@ -1,0 +1,5 @@
+region_id,region_label,country_code,timezone
+FR,France,FR,Europe/Paris
+ES,Espagne,ES,Europe/Madrid
+IT,Italie,IT,Europe/Rome
+GB,Royaume-Uni,GB,Europe/London

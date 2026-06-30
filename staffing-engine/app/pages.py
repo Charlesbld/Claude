@@ -33,6 +33,55 @@ def _sanitize_excel(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# Mapping couleur level (dynamique : L1, L2, L3…)
+_LEVEL_PALETTE = ["#3498DB", "#E67E22", "#2ECC71", "#9B59B6", "#E74C3C"]
+
+
+def _level_color_map(levels) -> dict[str, str]:
+    """Renvoie {\"L1\": couleur, \"L2\": couleur, …} pour n'importe quel ensemble de niveaux."""
+    return {f"L{l}": _LEVEL_PALETTE[i % len(_LEVEL_PALETTE)]
+            for i, l in enumerate(sorted(int(x) for x in set(levels)))}
+
+
+# Dépendances FK par table — utilisé pour alerter en cas de renommage d'ID.
+_FK_DEPS: dict[str, list[tuple[str, str]]] = {
+    "region":    [("pax_forecast", "region_id"), ("pax_real", "region_id"),
+                  ("contact_rate_forecast", "region_id"), ("tasks_real", "region_id"),
+                  ("group_map", "region_id")],
+    "supply":    [("pax_forecast", "supply_id"), ("pax_real", "supply_id"),
+                  ("contact_rate_forecast", "supply_id"), ("tasks_real", "supply_id"),
+                  ("group_map", "supply_id")],
+    "task_type": [("contact_rate_forecast", "task_type_id"), ("tasks_real", "task_type_id"),
+                  ("param_aht", "task_type_id")],
+    "group":     [("group_map", "group_id"), ("team_group", "group_id"),
+                  ("param_aht", "group_id")],
+}
+
+
+def _check_key_rename(old_df: pd.DataFrame, new_df: pd.DataFrame,
+                      key_col: str, table_name: str) -> None:
+    """Détecte les IDs supprimés ou renommés et avertit l'utilisateur des FK impactées."""
+    old_ids = set(old_df[key_col].dropna().astype(str))
+    new_ids = set(new_df[key_col].dropna().astype(str))
+    removed = old_ids - new_ids
+    if not removed:
+        return
+    deps = _FK_DEPS.get(table_name, [])
+    dep_str = ", ".join(f"`{tbl}.{col}`" for tbl, col in deps) if deps else "tables liées"
+    st.warning(
+        f"⚠️ **IDs supprimés ou renommés** : {', '.join(f'`{x}`' for x in sorted(removed))}. "
+        f"Ces valeurs sont utilisées comme clé étrangère dans : {dep_str}. "
+        "Les lignes orphelines seront ignorées dans les calculs. "
+        "Mettez à jour ces tables ou utilisez **Ingestion CSV** pour ré-importer les données avec le nouvel ID."
+    )
+
+
+def _cascade_info(items: list[tuple[str, str]]) -> None:
+    """Affiche une checklist de tâches de cascade post-sauvegarde."""
+    lines = "\n".join(f"- {icon} {desc}" for icon, desc in items)
+    st.info(f"**📋 Pour que ce changement soit actif dans le dimensionnement :**\n\n{lines}")
+
+
 # =============================================================================
 # BLOCS DE DOCUMENTATION (un par page)
 # Chaque fonction est appelée dans un st.expander depuis la page correspondante.
@@ -1919,9 +1968,14 @@ def render_ref_regions():
             },
         )
         if st.button("💾 Enregistrer les Régions", type="primary", key="save_region"):
+            _check_key_rename(df, edited, "region_id", "region")
             C.save_table("region", edited)
             st.success("Régions enregistrées.")
-            st.rerun()
+            _cascade_info([
+                ("🗺️", "**group_map** — ajouter le mapping Région×Supply→Groupe pour les nouveaux combos (onglet Mapping ci-dessous)"),
+                ("📊", "**pax_forecast** — saisir les PAX prévus pour chaque nouveau couple région×supply (Ingestion CSV ou Éditer les données)"),
+                ("📞", "**contact_rate_forecast** — saisir les taux de contact pour chaque région×supply×tâche"),
+            ])
 
     with tab_sup:
         st.markdown(
@@ -1940,9 +1994,14 @@ def render_ref_regions():
             },
         )
         if st.button("💾 Enregistrer les Modes de transport", type="primary", key="save_supply"):
+            _check_key_rename(df, edited, "supply_id", "supply")
             C.save_table("supply", edited)
             st.success("Modes de transport enregistrés.")
-            st.rerun()
+            _cascade_info([
+                ("🗺️", "**group_map** — router ce supply vers un groupe commercial (onglet Mapping ci-dessous)"),
+                ("📊", "**pax_forecast** — saisir les PAX pour ce supply × régions concernées"),
+                ("📞", "**contact_rate_forecast** — saisir les taux de contact pour ce supply"),
+            ])
 
     with tab_map:
         st.markdown(
@@ -2013,17 +2072,10 @@ def render_ref_groups():
 
     col_def, col_flow = st.columns(2)
     with col_def:
-        st.markdown("**Groupes par défaut :**")
-        st.dataframe(
-            pd.DataFrame([
-                {"Groupe": "DIRECT_AIR", "Description": "Billets aériens vendus en direct"},
-                {"Groupe": "OTA",        "Description": "Agences de voyage en ligne"},
-                {"Groupe": "RAIL",       "Description": "Ferroviaire"},
-                {"Groupe": "BUS",        "Description": "Autocar"},
-                {"Groupe": "FERRY",      "Description": "Maritime"},
-            ]),
-            hide_index=True, use_container_width=True,
-        )
+        st.markdown("**Groupes actuellement en base :**")
+        grp_live = C.table("group")
+        st.dataframe(grp_live.rename(columns={"group_id": "Groupe", "group_label": "Libellé"}),
+                     hide_index=True, use_container_width=True)
     with col_flow:
         st.markdown("**Comment le routage fonctionne :**")
         st.markdown("""
@@ -2046,9 +2098,14 @@ def render_ref_groups():
         },
     )
     if st.button("💾 Enregistrer les Groupes commerciaux", type="primary", key="save_group_page"):
+        _check_key_rename(df, edited, "group_id", "group")
         C.save_table("group", edited)
         st.success("Groupes commerciaux enregistrés.")
-        st.rerun()
+        _cascade_info([
+            ("🗺️", "**group_map** — router au moins une combinaison Région×Supply vers ce groupe (Régions → Mapping Groupe×Mois)"),
+            ("👥", "**team_group** — affecter au moins une équipe à ce groupe (Équipes → Affectation groupes)"),
+            ("📐", "**service_params** — optionnel : créer une ligne SLA spécifique à ce groupe si besoin (sinon la ligne générique s'applique)"),
+        ])
 
     st.divider()
     st.subheader("Équipes actuellement affectées par groupe")
@@ -2072,12 +2129,13 @@ def render_ref_groups():
         # Chart: nombre d'équipes par groupe et level
         count = tg_merged.groupby(["group_id", "level"]).size().reset_index(name="nb_équipes")
         count["Level"] = "L" + count["level"].astype(int).astype(str)
+        lvl_cmap = _level_color_map(count["level"].unique())
         fig = px.bar(count, x="group_id", y="nb_équipes", color="Level",
                      barmode="stack",
                      labels={"group_id": "Groupe commercial", "nb_équipes": "Nb équipes"},
                      title="Équipes affectées par groupe commercial",
-                     color_discrete_map={"L1": "#3498DB", "L2": "#E67E22"},
-                     category_orders={"Level": ["L1", "L2"]})
+                     color_discrete_map=lvl_cmap,
+                     category_orders={"Level": sorted(lvl_cmap.keys())})
         fig.update_layout(height=300, legend_title_text="Level")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -2118,9 +2176,15 @@ def render_ref_tasks():
         },
     )
     if st.button("💾 Enregistrer les Types de tâche", type="primary", key="save_task"):
+        _check_key_rename(df, edited, "task_type_id", "task_type")
         C.save_table("task_type", edited)
         st.success("Types de tâche enregistrés.")
-        st.rerun()
+        _cascade_info([
+            ("⏱️", "**param_aht** — définir l'AHT en secondes pour ce type de tâche (Paramètres → AHT par type de tâche)"),
+            ("📞", "**contact_rate_forecast** — saisir un taux de contact pour chaque mois × région × supply × tâche (Ingestion CSV ou Éditer les données)"),
+            ("🔢", "Level 1 → équipes L1 (BPO externe) doivent être affectées aux groupes concernés"),
+            ("🔢", "Level 2 → équipes L2 internes mutualisées — vérifier l'affectation dans Équipes → Affectation groupes"),
+        ])
 
     st.divider()
     st.subheader("AHT actuels par type de tâche")
@@ -2236,10 +2300,11 @@ def render_teams_page():
             with ch2:
                 df_chart2 = df_chart.copy()
                 df_chart2["Level"] = "L" + df_chart2["level"].astype(int).astype(str)
+                lvl_cmap2 = _level_color_map(df_chart2["level"].unique())
                 fig2 = px.bar(
                     df_chart2.sort_values("productivity"),
                     x="productivity", y="team_id", orientation="h",
-                    color="Level", color_discrete_map={"L1": "#27AE60", "L2": "#8E44AD"},
+                    color="Level", color_discrete_map=lvl_cmap2,
                     labels={"productivity": "Productivité (0–1)", "team_id": ""},
                     title="Productivité par équipe",
                 )
@@ -2494,6 +2559,7 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
         if not sla_data.empty:
             sla_data = sla_data.copy()
             sla_data["Level"] = "L" + sla_data["level"].astype(int).astype(str)
+            lvl_cmap_sla = _level_color_map(sla_data["level"].unique())
             if "group_id" in sla_data.columns:
                 sla_data["label"] = sla_data["Level"] + " — " + sla_data["group_id"].fillna("global")
             else:
@@ -2504,7 +2570,7 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
                                 color="Level", text="sl_target",
                                 labels={"label": "", "sl_target": "SLA cible"},
                                 title="SLA cible par configuration",
-                                color_discrete_map={"L1": "#3498DB", "L2": "#E67E22"})
+                                color_discrete_map=lvl_cmap_sla)
                 fig_sl.update_traces(texttemplate="%{text:.0%}")
                 fig_sl.update_yaxes(range=[0, 1.05], tickformat=".0%")
                 fig_sl.update_layout(height=300, showlegend=False)
@@ -2514,7 +2580,7 @@ Formule : **Workload (h) = contacts × AHT (s) / 3 600**
                                 color="Level", text="shrinkage",
                                 labels={"label": "", "shrinkage": "Shrinkage"},
                                 title="Shrinkage par configuration",
-                                color_discrete_map={"L1": "#3498DB", "L2": "#E67E22"})
+                                color_discrete_map=lvl_cmap_sla)
                 fig_sh.update_traces(texttemplate="%{text:.0%}")
                 fig_sh.update_yaxes(range=[0, 0.6], tickformat=".0%")
                 fig_sh.update_layout(height=300, showlegend=False)

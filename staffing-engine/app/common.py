@@ -37,7 +37,7 @@ def db_version() -> float:
 
 # --- lecture / écriture ------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def _read(name: str, _v: float) -> pd.DataFrame:
+def _read(name: str, v: float) -> pd.DataFrame:
     return db.read_table(name)
 
 
@@ -67,23 +67,23 @@ def ingest_upload(table: str, buffer, label: str = "") -> dict:
 
 # --- calculs (cachés sur le mois + version base) -----------------------------
 @st.cache_data(show_spinner="Calcul de la demande forecast…")
-def demand(month: str, _v: float) -> pd.DataFrame:
+def demand(month: str, v: float) -> pd.DataFrame:
     return model.build_forecast_demand(month)
 
 
 @st.cache_data(show_spinner="Dimensionnement Erlang C par groupe…")
-def required(month: str, _v: float) -> pd.DataFrame:
+def required(month: str, v: float) -> pd.DataFrame:
     from staffing.model import required_by_group
-    return required_by_group(demand(month, _v))
+    return required_by_group(demand(month, v))
 
 
 @st.cache_data(show_spinner="Calcul de la couverture…")
-def coverage(month: str, _v: float) -> dict:
+def coverage(month: str, v: float) -> dict:
     return optimizer.build_coverage(month)
 
 
 @st.cache_data(show_spinner=False)
-def actuals(_v: float) -> pd.DataFrame:
+def actuals(v: float) -> pd.DataFrame:
     return model.actuals_vs_forecast()
 
 

@@ -282,9 +282,10 @@ def actuals_vs_forecast(db_path=db.DB_PATH) -> pd.DataFrame:
     tr = db.read_table("tasks_real", db_path).rename(columns={"tasks": "tasks_real"})
     crf = db.read_table("contact_rate_forecast", db_path).rename(columns={"contact_rate": "cr_forecast"})
     gmap = db.read_table("group_map", db_path)
+    gmap_active = gmap[gmap["active"] == 1]
 
     df = (crf.merge(paxf, on=["month", "region_id", "supply_id"], how="left")
-          .merge(gmap[["month", "region_id", "supply_id", "group_id"]],
+          .merge(gmap_active[["month", "region_id", "supply_id", "group_id"]],
                  on=["month", "region_id", "supply_id"], how="left")
           .merge(paxr, on=["month", "region_id", "supply_id"], how="left")
           .merge(tr, on=["month", "region_id", "supply_id", "task_type_id"], how="left"))

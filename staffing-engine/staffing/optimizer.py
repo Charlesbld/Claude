@@ -16,9 +16,12 @@ L'allocation produite (dow × slot_utc × équipe → agents) est stockée en ba
 """
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 import pulp
+
+logger = logging.getLogger(__name__)
 
 from . import db
 from .model import build_forecast_demand, month_local_dates, required_by_group
@@ -205,6 +208,14 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
                     prob += pulp.lpSum(terms) <= cap_val
 
         prob.solve(solver)
+
+        lp_status = pulp.LpStatus[prob.status]
+        if lp_status != "Optimal":
+            logger.warning(
+                "LP %s: statut=%s — allocation possiblement incomplète pour dow=%d "
+                "(capacité insuffisante ou fenêtres de disponibilité trop courtes ?)",
+                prob.name, lp_status, dow,
+            )
 
         # Extract allocation: agents per (team, slot) = sum of x[(team, sid)]
         # for all shifts covering that slot.

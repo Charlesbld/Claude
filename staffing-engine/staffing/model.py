@@ -36,12 +36,12 @@ def _slot_to_utc(dates: pd.DatetimeIndex, tz: str) -> pd.DataFrame:
     df = pd.MultiIndex.from_product([pd.DatetimeIndex(dates), slots],
                                     names=["date", "slot_local"]).to_frame(index=False)
     local = df["date"] + df["slot_local"] * pd.Timedelta(minutes=BUCKET_MINUTES)
-    aware = local.dt.tz_localize(tz, nonexistent="shift_forward", ambiguous="NaT")
+    # ambiguous=True : lors du retour à l'heure d'hiver, l'heure ambiguë est interprétée
+    # comme le PREMIER passage (heure d'été), ce qui préserve tous les buckets (~4/an perdus
+    # avec ambiguous="NaT"). Le volume mensuel est ainsi conservé sur toute l'année.
+    aware = local.dt.tz_localize(tz, nonexistent="shift_forward", ambiguous=True)
     df["bucket_utc"] = aware.dt.tz_convert("UTC")
     df["dow"] = df["date"].dt.dayofweek
-    # NOTE DST : le jour du passage à l'heure d'hiver, l'heure ambiguë → NaT → supprimée ici.
-    # ~4 buckets (1 h) sont perdus ce jour-là → très légère sous-évaluation du volume mensuel
-    # (2 fois/an). Pour corriger : remplacer ambiguous="NaT" par ambiguous=True (premier passage).
     return df.dropna(subset=["bucket_utc"])
 
 

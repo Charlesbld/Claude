@@ -24,6 +24,15 @@ from staffing.timespine import BUCKET_HOURS, BUSINESS_TZ
 DIV = "RdYlGn"
 
 
+def _sanitize_excel(df: pd.DataFrame) -> pd.DataFrame:
+    """Préfixe d'une apostrophe les cellules texte commençant par = + - @ (injection de formule Excel)."""
+    out = df.copy()
+    for col in out.select_dtypes(include="object").columns:
+        mask = out[col].astype(str).str.match(r"^[=+\-@]")
+        out.loc[mask, col] = "'" + out.loc[mask, col].astype(str)
+    return out
+
+
 # =============================================================================
 # BLOCS DE DOCUMENTATION (un par page)
 # Chaque fonction est appelée dans un st.expander depuis la page correspondante.
@@ -1451,7 +1460,7 @@ def _build_monthly_report(month: str, prev_month: str | None = None) -> io.Bytes
                 .reset_index()
                 .sort_values(["level", "total_cost"], ascending=[True, False])
             )
-            cost_group.to_excel(writer, sheet_name="Synthèse", index=False, startrow=0)
+            _sanitize_excel(cost_group).to_excel(writer, sheet_name="Synthèse", index=False, startrow=0)
 
             # ETP requis vs capacité (par level)
             by_level_out = by_level[
@@ -1459,7 +1468,7 @@ def _build_monthly_report(month: str, prev_month: str | None = None) -> io.Bytes
                  "required_fte_avg", "capacity_avg", "hours_understaffed"]
             ]
             startrow = len(cost_group) + 3
-            by_level_out.to_excel(writer, sheet_name="Synthèse", index=False, startrow=startrow)
+            _sanitize_excel(by_level_out).to_excel(writer, sheet_name="Synthèse", index=False, startrow=startrow)
         else:
             # Aucune allocation : on écrit un onglet vide avec message
             pd.DataFrame({"info": ["Aucune allocation pour ce mois. Lancez l'optimiseur."]}).to_excel(
@@ -1493,7 +1502,7 @@ def _build_monthly_report(month: str, prev_month: str | None = None) -> io.Bytes
                      month: kpi_curr["contacts"],
                      "Delta": kpi_curr["contacts"] - kpi_prev["contacts"]},
                 ])
-                comp.to_excel(writer, sheet_name="Comparatif M vs M-1", index=False)
+                _sanitize_excel(comp).to_excel(writer, sheet_name="Comparatif M vs M-1", index=False)
             except Exception:
                 pd.DataFrame({"info": [f"Données indisponibles pour {prev_month}."]}).to_excel(
                     writer, sheet_name="Comparatif M vs M-1", index=False)
@@ -1513,7 +1522,7 @@ def _build_monthly_report(month: str, prev_month: str | None = None) -> io.Bytes
                 for col in ["start_utc", "end_utc"]:
                     if col in gaps_out.columns:
                         gaps_out[col] = gaps_out[col].dt.tz_convert(BUSINESS_TZ).dt.strftime("%Y-%m-%d %H:%M")
-                gaps_out.to_excel(writer, sheet_name="Gaps prioritaires", index=False)
+                _sanitize_excel(gaps_out).to_excel(writer, sheet_name="Gaps prioritaires", index=False)
         else:
             pd.DataFrame({"info": ["Aucune donnée de couverture disponible."]}).to_excel(
                 writer, sheet_name="Gaps prioritaires", index=False)

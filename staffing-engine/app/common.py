@@ -50,6 +50,28 @@ def save_table(name: str, df: pd.DataFrame):
         st.error(f"Impossible d'enregistrer « {name} » : la table est vide. "
                  "Supprimer toutes les lignes effacerait la table — annulé.")
         st.stop()
+    # m4-bis: reject duplicate keys before overwriting the table (editor path).
+    spec = db.TABLES.get(name)
+    if spec and spec.keys:
+        dup_mask = df.duplicated(subset=[k for k in spec.keys if k in df.columns], keep=False)
+        if dup_mask.any():
+            st.error(
+                f"Impossible d'enregistrer « {name} » : {dup_mask.sum()} ligne(s) "
+                f"en doublon sur les clés {spec.keys}. Corrigez avant d'enregistrer."
+            )
+            st.stop()
+    # m7: warn when coerce_types silently converts non-numeric values to NaN.
+    coerced = db.coerce_types(name, df)
+    nan_gains: dict[str, int] = {
+        col: int(coerced[col].isna().sum() - df[col].isna().sum())
+        for col in coerced.columns
+        if col in df.columns and int(coerced[col].isna().sum() - df[col].isna().sum()) > 0
+    }
+    if nan_gains:
+        st.warning(
+            f"⚠️ Valeurs non numériques converties en NaN lors de l'enregistrement "
+            f"de « {name} » : {nan_gains}. Vérifiez ces cellules."
+        )
     db.write_table(name, df)
     st.cache_data.clear()
 

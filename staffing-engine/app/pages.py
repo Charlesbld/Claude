@@ -977,8 +977,15 @@ def render_coverage():
         if cc[2].button("🚀 (Ré)optimiser", type="primary"):
             lengths = tuple(int(h * 4) for h in (lens or [6, 8]))
             with st.spinner("Optimisation…"):
-                C.run_optimizer(month, percentile=pct, shift_lengths=lengths)
-            st.success("Allocation optimisée.")
+                lp_warns = C.run_optimizer(month, percentile=pct, shift_lengths=lengths)
+            if lp_warns:
+                st.warning(
+                    "⚠️ Solveur non-optimal pour : " + ", ".join(lp_warns) +
+                    " — capacité insuffisante ou fenêtres de disponibilité trop courtes. "
+                    "L'allocation de ces jours peut être incomplète."
+                )
+            else:
+                st.success("Allocation optimisée.")
             st.rerun()
 
     cov = C.coverage(month, C.db_version())

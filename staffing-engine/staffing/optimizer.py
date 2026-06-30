@@ -24,8 +24,24 @@ import pulp
 logger = logging.getLogger(__name__)
 
 from . import db
-from .model import build_forecast_demand, month_local_dates, required_by_group
+from .model import build_forecast_demand, month_local_dates, required_by_group, required_by_level
 from .timespine import BUCKET_HOURS, BUCKETS_PER_DAY
+
+# Levels whose teams share a mutualized queue (any agent handles any group on a slot).
+# For these levels the LP has ONE coverage constraint per slot (pooled across groups)
+# instead of N per-group constraints — avoids crediting the same physical agents
+# to each group independently (M1 double-counting fix).
+# Level 1 (external) teams are group-specific → keep per-group constraints.
+MUTUALIZED_LEVELS: frozenset[int] = frozenset({2})
+
+# Module-level warning accumulator — cleared and repopulated by each
+# optimize_allocation call. Thread-safe for Streamlit's single-threaded model.
+_run_warnings: list[str] = []
+
+
+def get_last_run_warnings() -> list[str]:
+    """Return LP non-Optimal warnings from the most recent optimize_allocation call."""
+    return list(_run_warnings)
 
 
 def _hhmm_to_slot(value: str) -> int:
@@ -84,14 +100,29 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
                         shift_lengths=(24, 32), start_step: int = 4,
                         time_limit: int = 20, gap_rel: float = 0.02,
                         write: bool = True) -> pd.DataFrame:
-    """Résout l'IP par (groupe, level, dow) et renvoie l'allocation (dow, slot_utc, team, agents)."""
+    """Résout l'IP par dow et renvoie l'allocation (dow, slot_utc, team, agents).
+
+    Niveaux L1 (externe) : contrainte de couverture par (group, slot) — Erlang C par groupe.
+    Niveaux L2 mutualisés (MUTUALIZED_LEVELS) : contrainte unique par slot, sur la demande
+    poolée de tous les groupes → un seul calcul Erlang C, pas de double-comptage de capacité.
+    """
+    global _run_warnings
+    _run_warnings = []
+
     solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=time_limit, gapRel=gap_rel)
     demand = build_forecast_demand(month, db_path)
-    required = required_by_group(demand, db_path)
+    required = required_by_group(demand, db_path)   # L1 : par groupe
+    required_pool = required_by_level(demand, db_path)  # L2 mutualisé : poolé par level
     required["dow"] = required["bucket_utc"].dt.dayofweek
     required["slot_utc"] = required["bucket_utc"].dt.hour * 4 + required["bucket_utc"].dt.minute // 15
-    rep = (required.groupby(["dow", "slot_utc", "level", "group_id"])["required_fte"]
+    required_pool["dow"] = required_pool["bucket_utc"].dt.dayofweek
+    required_pool["slot_utc"] = required_pool["bucket_utc"].dt.hour * 4 + required_pool["bucket_utc"].dt.minute // 15
+    rep = (required[~required["level"].isin(MUTUALIZED_LEVELS)]
+           .groupby(["dow", "slot_utc", "level", "group_id"])["required_fte"]
            .quantile(percentile).reset_index())
+    rep_pool = (required_pool[required_pool["level"].isin(MUTUALIZED_LEVELS)]
+                .groupby(["dow", "slot_utc", "level"])["required_fte"]
+                .quantile(percentile).reset_index())
 
     teams = db.read_table("team", db_path)
     availability = db.read_table("team_availability", db_path)
@@ -122,22 +153,15 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
                 for slot in cover:
                     cover_idx[team][slot].append((sid, L))
 
-        # --- Build a single IP per dow with shared variables across all groups ---
-        # Key insight: x[(team, sid)] represents total physical agents from a team
-        # on a shift. A team can serve multiple groups simultaneously (their capacity
-        # is split / shared across groups in expand_allocation + build_coverage).
+        # --- One IP per dow, shared variables across all groups ---
+        # x[(team, sid)] = physical agents on this shift (shared, not per-group).
+        # Global capacity: Σ_shifts_covering_slot x[team,sid] <= cap[team].
         #
-        # The old per-(group,level) IP allowed the same team to have cap[team] agents
-        # allocated to group A AND cap[team] agents to group B, violating physical limits.
-        #
-        # Fix: one global IP per dow where x[(team, sid)] is shared. The total agents
-        # per (team, slot) = sum of x[(team, sid)] for all shifts covering that slot.
-        # This sum must be <= cap[team] (the physical headcount limit).
-        #
-        # Coverage constraints: for each (group, level, slot), require that the teams
-        # assigned to that group collectively cover the ETP requirement.
+        # L1 coverage: per (group, slot) → require Σ L1_team_agents*prod >= required_fte_group
+        # L2 coverage (MUTUALIZED_LEVELS): per slot only → require Σ L2_team_agents*prod >= pooled_fte
+        #   Pooling avoids crediting the same physical agents to each group separately (M1 fix).
 
-        # Collect all (group_id, level) combos active this dow
+        # L1 (non-mutualized) per-group pairs
         gl_pairs = []
         for group_id in groups:
             levels = rep[(rep["dow"] == dow) & (rep["group_id"] == group_id)]["level"].unique()
@@ -146,12 +170,27 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
                 if team_ids:
                     gl_pairs.append((group_id, int(level), team_ids))
 
-        if not gl_pairs:
+        # Mutualized levels (L2): one pooled constraint per (level, slot), all L2 teams
+        mutualized_teams: dict[int, set[str]] = {}  # level → set of team_ids
+        for group_id in rep[rep["dow"] == dow]["group_id"].unique():
+            pass  # all groups already in rep (non-mutualized only)
+        pool_levels = rep_pool[rep_pool["dow"] == dow]["level"].unique()
+        for lvl in pool_levels:
+            tids: set[str] = set()
+            # collect all teams at this mutualized level, across all groups they serve
+            for gid in team_group["group_id"].unique():
+                tids.update(teams_for(gid, int(lvl)))
+            if tids:
+                mutualized_teams[int(lvl)] = tids
+
+        if not gl_pairs and not mutualized_teams:
             continue
 
-        # Collect all teams active this dow (across all groups)
+        # All teams active this dow (L1 groups + mutualized levels)
         all_active_teams: set[str] = set()
         for _gid, _lvl, tids in gl_pairs:
+            all_active_teams.update(tids)
+        for tids in mutualized_teams.values():
             all_active_teams.update(tids)
 
         prob = pulp.LpProblem(f"alloc_{dow}", pulp.LpMinimize)
@@ -173,23 +212,7 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
             for (_s, L, _c) in cand[team] if _s == sid
         )
 
-        # HYPOTHÈSE ARCHITECTURALE : file mutualisée.
-        # Les équipes L2 internes sont supposées traiter n'importe quel groupe au fil de l'eau
-        # (un agent peut passer de DIRECT_AIR à OTA dans le même créneau).
-        # Conséquence : les contraintes de couverture ci-dessous comptent les mêmes agents
-        # pour chaque groupe qu'ils servent → la couverture rapportée est optimiste si en
-        # réalité les groupes sont des files étanches (un agent dédié à un seul groupe).
-        #
-        # POUR CHANGER : si les groupes sont des files ÉTANCHES, remplacer par une variable
-        # x[team, sid, group] avec la contrainte Σ_group x[team,sid,group] = x[team,sid].
-        # Si les groupes sont TOUS mutualisés, pooler la demande avant Erlang C
-        # (un seul appel erlang.required_agents sur la somme des contacts par level×slot).
-
-        # Coverage constraints: per (group, level, slot)
-        # A team's effective contribution to a group at a slot =
-        #   agents_at_slot * productivity (capacity shared across groups).
-        # Since expand_allocation merges with team_group (one row per group),
-        # the coverage is computed at the group level using the shared agents.
+        # L1 coverage: one constraint per (group, slot) — per-group Erlang C target.
         for group_id, level, team_ids in gl_pairs:
             req_d = {int(r.slot_utc): r.required_fte
                      for r in rep[(rep["dow"] == dow) & (rep["group_id"] == group_id)
@@ -199,6 +222,23 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
                 if need > 0:
                     terms = [x[(team, sid)] * prod[team]
                              for team in team_ids
+                             for (sid, _L) in cover_idx[team][slot]
+                             if (team, sid) in x]
+                    if terms:
+                        prob += pulp.lpSum(terms) >= need
+
+        # L2 mutualized coverage: one constraint per (level, slot) on pooled demand.
+        # The pooled Erlang C already accounts for cross-group contact pooling gains,
+        # and each physical agent is counted exactly once per slot (no double-counting).
+        for lvl, tids in mutualized_teams.items():
+            req_d = {int(r.slot_utc): r.required_fte
+                     for r in rep_pool[(rep_pool["dow"] == dow)
+                                       & (rep_pool["level"] == lvl)].itertuples()}
+            for slot in range(BUCKETS_PER_DAY):
+                need = req_d.get(slot, 0.0)
+                if need > 0:
+                    terms = [x[(team, sid)] * prod[team]
+                             for team in tids
                              for (sid, _L) in cover_idx[team][slot]
                              if (team, sid) in x]
                     if terms:
@@ -223,6 +263,9 @@ def optimize_allocation(month: str, db_path=db.DB_PATH, percentile: float = 1.0,
 
         lp_status = pulp.LpStatus[prob.status]
         if lp_status != "Optimal":
+            day_names = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+            msg = f"{day_names[dow]} ({lp_status})"
+            _run_warnings.append(msg)
             logger.warning(
                 "LP %s: statut=%s — allocation possiblement incomplète pour dow=%d "
                 "(capacité insuffisante ou fenêtres de disponibilité trop courtes ?)",

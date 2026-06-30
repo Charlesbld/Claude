@@ -91,9 +91,11 @@ def actuals(v: float) -> pd.DataFrame:
     return model.actuals_vs_forecast()
 
 
-def run_optimizer(month: str, **kw):
+def run_optimizer(month: str, **kw) -> list[str]:
+    """Lance l'optimiseur et retourne les avertissements LP (DOW non-Optimal)."""
     optimizer.optimize_allocation(month, **kw)
     st.cache_data.clear()
+    return optimizer.get_last_run_warnings()
 
 
 # --- petites aides -----------------------------------------------------------

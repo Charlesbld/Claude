@@ -186,8 +186,8 @@ def main(db_path=None) -> None:
     contact_rate_forecast = pd.DataFrame(crf)
     tasks_real = pd.DataFrame(tr)
 
-    param_aht = pd.DataFrame([(t, aht) for t, _, _, _, aht in TASK_TYPES],
-                             columns=["task_type_id", "aht_seconds"])
+    param_aht = _load_master("param_aht", pd.DataFrame(
+        [(t, aht) for t, _, _, _, aht in TASK_TYPES], columns=["task_type_id", "aht_seconds"]))
 
     _default_team = pd.DataFrame(TEAMS, columns=["team_id", "team_label", "level", "sourcing",
                                                   "country_code", "timezone", "productivity",

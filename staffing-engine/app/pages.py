@@ -1663,6 +1663,29 @@ def _import_section():
             st.dataframe(pd.DataFrame(reports), width="stretch", hide_index=True)
             st.rerun()
 
+    st.divider()
+    with st.expander("🗑️ Réinitialiser les données synthétiques (danger)", expanded=False):
+        st.warning(
+            "L'import est un **upsert** : il remplace uniquement les lignes dont la clé "
+            "(mois × région × supply…) apparaît dans votre CSV — les anciennes lignes "
+            "**synthétiques** (issues du seed initial) pour les mois/régions absents de "
+            "votre CSV **restent en base**. Si vous voulez repartir sur des données 100% "
+            "réelles, videz d'abord les tables volumétriques ci-dessous, puis relancez "
+            "l'ingestion de `data/incoming/`."
+        )
+        wipe_tables = ["pax_real", "pax_forecast", "tasks_real", "contact_rate_forecast", "group_map"]
+        to_wipe = st.multiselect("Tables à vider avant ré-ingestion", wipe_tables,
+                                 default=wipe_tables, key="wipe_sel")
+        confirm = st.checkbox("Je confirme vouloir supprimer ces données (irréversible)", key="wipe_confirm")
+        if st.button("🗑️ Vider les tables sélectionnées", type="secondary", key="wipe_btn",
+                     disabled=not (to_wipe and confirm)):
+            for t in to_wipe:
+                db.write_table(t, pd.DataFrame(columns=ingest.expected_columns(db.TABLES[t])))
+            st.cache_data.clear()
+            st.success(f"Tables vidées : {', '.join(to_wipe)}. "
+                       "Cliquez maintenant sur « Ré-ingérer tout le dossier data/incoming/ » ci-dessus.")
+            st.rerun()
+
 
 # =============================================================================
 # RAPPORT MENSUEL (IMP-1)

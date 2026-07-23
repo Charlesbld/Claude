@@ -2191,6 +2191,18 @@ def _group_map_editor_regions():
     # Add group_id column (one per region×supply, from latest month)
     latest = gm.loc[gm.groupby(["region_id", "supply_id"])["month"].idxmax(), ["region_id", "supply_id", "group_id"]]
     piv = piv.merge(latest, on=["region_id", "supply_id"], how="left")
+    # Un group_id présent dans group_map mais absent de la table `group` (référentiel)
+    # ne peut pas s'afficher dans le SelectboxColumn (Streamlit l'affiche vide sans erreur).
+    orphan_mask = piv["group_id"].notna() & ~piv["group_id"].isin(all_groups)
+    if orphan_mask.any():
+        orphans = sorted(piv.loc[orphan_mask, "group_id"].unique())
+        st.warning(
+            f"⚠️ **{orphan_mask.sum()} combo(s)** référencent un groupe absent des Référentiels : "
+            f"{', '.join(f'`{o}`' for o in orphans)}. La cellule apparaît **vide** dans le tableau "
+            "ci-dessous car Streamlit ne peut pas afficher une valeur hors liste. "
+            "Ajoutez ce groupe dans **Référentiels → Groupes**, ou corrigez le `group_id` "
+            "dans votre CSV group_map."
+        )
     # Reorder: put group_id right after supply_id
     front = ["region_id", "supply_id", "group_id"]
     piv = piv[front + [c for c in piv.columns if c not in front]]

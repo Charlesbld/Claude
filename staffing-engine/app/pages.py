@@ -65,6 +65,38 @@ def _resolve(series: pd.Series, inv: dict) -> pd.Series:
     return series.map(lambda x: inv.get(str(x), x) if pd.notna(x) else x)
 
 
+def _pool_matching_tasks(matching: pd.DataFrame) -> pd.DataFrame:
+    """Ré-agrège `matching` (désormais par tâche) en (bucket, level, group) pour les vues
+    existantes (heatmap, trous, KPI globaux) qui attendent une ligne par groupe, pas par tâche."""
+    if matching.empty:
+        return matching
+    g = matching.groupby(["bucket_utc", "level", "group_id"], as_index=False).agg(
+        contacts=("contacts", "sum"), workload_hours=("workload_hours", "sum"),
+        agents_online=("agents_online", "sum"), required_fte=("required_fte", "sum"),
+        effective_capacity=("effective_capacity", "sum"), agents=("agents", "sum"),
+        cost=("cost", "sum"), shrinkage=("shrinkage", "mean"),
+    )
+    g["gap_fte"] = g["effective_capacity"] - g["required_fte"]
+    g["understaffed"] = g["gap_fte"] < -1e-9
+    req = g["required_fte"].to_numpy(dtype=float)
+    capv = g["effective_capacity"].to_numpy(dtype=float)
+    g["coverage_ratio"] = np.divide(capv, req, out=np.full_like(capv, np.nan), where=req > 1e-9)
+    avail_prod = capv * BUCKET_HOURS * (1.0 - g["shrinkage"].to_numpy(dtype=float))
+    wl = g["workload_hours"].to_numpy(dtype=float)
+    occ = np.divide(wl, avail_prod, out=np.zeros_like(wl), where=avail_prod > 1e-9)
+    g["real_occupancy"] = np.where((avail_prod <= 1e-9) & (wl > 1e-9), np.inf, occ)
+    return g.sort_values(["level", "group_id", "bucket_utc"]).reset_index(drop=True)
+
+
+def _pool_supply_tasks(supply_team: pd.DataFrame) -> pd.DataFrame:
+    """Ré-agrège `supply_team` (désormais par tâche) en (bucket, team, group, level)."""
+    if supply_team.empty:
+        return supply_team
+    return supply_team.groupby(["bucket_utc", "team_id", "group_id", "level"], as_index=False).agg(
+        agents=("agents", "sum"), effective_capacity=("effective_capacity", "sum"),
+        cost=("cost", "sum"))
+
+
 def _sanitize_excel(df: pd.DataFrame) -> pd.DataFrame:
     """Préfixe d'une apostrophe les cellules texte commençant par = + - @ (injection de formule Excel)."""
     out = df.copy()
@@ -1111,7 +1143,8 @@ def _render_occupancy_by_team(matching: pd.DataFrame, supply_team: pd.DataFrame,
     # Remplacer inf par NaN pour le calcul de moyenne pondérée
     match_lv["real_occupancy"] = match_lv["real_occupancy"].replace([np.inf, -np.inf], np.nan)
 
-    # Joindre sur (bucket_utc, level, group_id)
+    # Joindre sur (bucket_utc, level, group_id). NOTE : matching/supply_team ici sont déjà
+    # poolés sur la dimension tâche par l'appelant (render_coverage) — une ligne par groupe.
     joined = sup_lv.merge(match_lv, on=["bucket_utc", "level", "group_id"], how="left")
     if joined.empty or "real_occupancy" not in joined.columns:
         st.info("Impossible de calculer l'occupation par équipe (données insuffisantes).")
@@ -1217,10 +1250,14 @@ def render_coverage():
             st.rerun()
 
     cov = C.coverage(month, C.db_version())
-    matching, supply_team, demand = cov["matching"], cov["supply_team"], cov["demand"]
-    if supply_team.empty:
+    matching_task, supply_team_task, demand = cov["matching"], cov["supply_team"], cov["demand"]
+    if supply_team_task.empty:
         st.info("Aucune allocation pour ce mois. Ouvrez l'optimiseur ci-dessus et lancez « (Ré)optimiser ».")
         return
+    # Cette page affiche des vues groupées par (level, groupe) — pooler la dimension tâche
+    # ici (le détail par tâche exact reste disponible page ⑦ Rapports d'activité).
+    matching = _pool_matching_tasks(matching_task)
+    supply_team = _pool_supply_tasks(supply_team_task)
 
     # --- filtres -------------------------------------------------------------
     f = st.columns(6)
@@ -1368,8 +1405,16 @@ def render_coverage():
     st.subheader("✏️ Répartition d'agents (éditable)")
     st.caption("Ajustez le nb d'agents par équipe et par créneau (UTC) pour un jour de semaine. "
                "« Enregistrer » recalcule la couverture sans relancer l'optimiseur.")
-    dow = st.selectbox("Jour de semaine", list(range(7)),
-                       format_func=lambda d: ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][d])
+    c_dow, c_task = st.columns(2)
+    dow = c_dow.selectbox("Jour de semaine", list(range(7)),
+                          format_func=lambda d: ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"][d])
+    tasks_lvl = C.table("task_type")
+    tasks_lvl = tasks_lvl[tasks_lvl["level"] == level]["task_type_id"].tolist()
+    if not tasks_lvl:
+        st.info("Aucun type de tâche défini pour ce level.")
+        return
+    task_sel = c_task.selectbox("Type de tâche", tasks_lvl, format_func=C.fmt("task_type"),
+                                key=f"alloc_task_{level}")
     alloc = C.table("allocation")
     teams_lvl = C.table("team")
     teams_lvl = teams_lvl[teams_lvl["level"] == level]["team_id"].tolist()
@@ -1377,14 +1422,15 @@ def render_coverage():
     # En-têtes du tableau : "Libellé (ID)" pour chaque équipe
     col_display = {tid: f"{team_lbls.get(tid, tid)} ({tid})" for tid in teams_lvl}
     col_inverse = {v: k for k, v in col_display.items()}
-    sub = alloc[(alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl))]
+    sub = alloc[(alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl))
+               & (alloc["task_type_id"] == task_sel)]
     grid = (sub.pivot_table(index="slot_utc", columns="team_id", values="agents", fill_value=0)
             .reindex(range(96), fill_value=0).reindex(columns=teams_lvl, fill_value=0).reset_index())
     grid["UTC"] = grid["slot_utc"].map(lambda s: f"{s * 15 // 60:02d}:{s * 15 % 60:02d}")
     grid = grid[["UTC"] + teams_lvl].rename(columns=col_display)
     display_cols = [col_display[t] for t in teams_lvl]
-    edited = st.data_editor(grid, width="stretch", hide_index=True, height=300, key=f"alloc_{dow}_{level}",
-                            disabled=["UTC"])
+    edited = st.data_editor(grid, width="stretch", hide_index=True, height=300,
+                            key=f"alloc_{dow}_{level}_{task_sel}", disabled=["UTC"])
     if st.button("💾 Enregistrer la répartition", type="primary"):
         e = edited.copy()
         # Reconstituer slot_utc depuis la colonne 'UTC' (format 'HH:MM') pour
@@ -1400,8 +1446,11 @@ def render_coverage():
         long = e.melt(id_vars="slot_utc", value_vars=teams_lvl, var_name="team_id", value_name="agents")
         long = long[long["agents"] > 0]
         long["dow"] = dow
-        keep = alloc[~((alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl)))]
-        C.save_table("allocation", pd.concat([keep, long[["dow", "slot_utc", "team_id", "agents"]]], ignore_index=True))
+        long["task_type_id"] = task_sel
+        keep = alloc[~((alloc["dow"] == dow) & (alloc["team_id"].isin(teams_lvl))
+                       & (alloc["task_type_id"] == task_sel))]
+        C.save_table("allocation", pd.concat(
+            [keep, long[["dow", "slot_utc", "team_id", "task_type_id", "agents"]]], ignore_index=True))
         st.success("Répartition enregistrée.")
         _cascade_info([
             ("📊", "La couverture (heatmap, KPI, gaps) se recalcule automatiquement depuis cette allocation — pas besoin de relancer l'optimiseur"),
@@ -1525,6 +1574,177 @@ def _explorer_source(name, month):
     if name == "actuals":
         return C.actuals(C.db_version())
     return pd.DataFrame()
+
+
+# =============================================================================
+# ⑦ RAPPORTS D'ACTIVITÉ (par équipe × tâche × groupe, Jour / Mois / Année)
+# =============================================================================
+def _activity_hours_cost(supply_team_task: pd.DataFrame, tz: str) -> pd.DataFrame:
+    """Heures agent + coût par (date locale, team, level, group, task) — EXACT, vient
+    directement de l'allocation optimisée/éditée (pas d'estimation)."""
+    if supply_team_task.empty:
+        return pd.DataFrame(columns=["date", "team_id", "level", "group_id", "task_type_id",
+                                     "agent_hours", "cost", "agents"])
+    d = supply_team_task.copy()
+    d["date"] = d["bucket_utc"].dt.tz_convert(tz).dt.date
+    d["agent_hours"] = d["agents"] * BUCKET_HOURS
+    return (d.groupby(["date", "team_id", "level", "group_id", "task_type_id"], as_index=False)
+            .agg(agent_hours=("agent_hours", "sum"), cost=("cost", "sum"), agents=("agents", "sum")))
+
+
+def _activity_task_volume_estimate(demand: pd.DataFrame, supply_team_task: pd.DataFrame,
+                                   tz: str) -> pd.DataFrame:
+    """Volume de contacts ESTIMÉ traité par équipe, réparti au prorata de la part de
+    capacité de chaque équipe sur la file (groupe × tâche × créneau). Contrairement aux
+    heures/coût (exacts), ceci est une estimation — deux équipes à capacité égale sur une
+    même file se voient attribuer le même volume, sans garantie que ce soit la réalité."""
+    if demand.empty or supply_team_task.empty:
+        return pd.DataFrame(columns=["date", "team_id", "group_id", "task_type_id", "contacts_est"])
+    total_cap = (supply_team_task.groupby(["bucket_utc", "level", "group_id", "task_type_id"],
+                                          as_index=False)["effective_capacity"].sum()
+                .rename(columns={"effective_capacity": "total_capacity"}))
+    sup = supply_team_task.merge(total_cap, on=["bucket_utc", "level", "group_id", "task_type_id"])
+    sup["share"] = np.where(sup["total_capacity"] > 1e-9,
+                            sup["effective_capacity"] / sup["total_capacity"], 0.0)
+    merged = sup.merge(
+        demand[["bucket_utc", "level", "group_id", "task_type_id", "contacts"]],
+        on=["bucket_utc", "level", "group_id", "task_type_id"], how="left")
+    merged["contacts"] = merged["contacts"].fillna(0.0)
+    merged["contacts_est"] = merged["contacts"] * merged["share"]
+    merged["date"] = merged["bucket_utc"].dt.tz_convert(tz).dt.date
+    return (merged.groupby(["date", "team_id", "group_id", "task_type_id"], as_index=False)
+            ["contacts_est"].sum())
+
+
+def render_activity_reports():
+    """⑦ Rapports d'activité — heures, coût et volume par équipe × tâche × groupe."""
+    st.header("📊 ⑦ Rapports d'activité")
+    st.markdown("""
+    Ventilation de l'activité **par équipe**, **par type de tâche** et **par groupe commercial** :
+    - **Heures agent** et **coût** viennent directement de l'allocation → **valeurs exactes**.
+    - **Volume de contacts traités par équipe** est **estimé** au prorata de la part de capacité
+      de chaque équipe sur sa file (groupe × tâche) — deux équipes à capacité égale se voient
+      attribuer un volume égal, sans garantie que ce soit la réalité exacte.
+    """)
+    month = C.month_selector(key="act_month")
+    v = C.db_version()
+    cov = C.coverage(month, v)
+    matching_task, supply_team_task, demand = cov["matching"], cov["supply_team"], cov["demand"]
+    if supply_team_task.empty:
+        st.info("Aucune allocation pour ce mois. Lancez l'optimiseur (page ⑥ Couverture).")
+        return
+
+    hours_cost = _activity_hours_cost(supply_team_task, BUSINESS_TZ)
+    vol_est = _activity_task_volume_estimate(demand, supply_team_task, BUSINESS_TZ)
+    activity = hours_cost.merge(vol_est, on=["date", "team_id", "group_id", "task_type_id"], how="left")
+    activity["contacts_est"] = activity["contacts_est"].fillna(0.0)
+    activity = _with_dn(activity, "team_id", "group_id", "task_type_id")
+    activity["date"] = pd.to_datetime(activity["date"])
+
+    tab_day, tab_month, tab_year = st.tabs(["📅 Jour", "🗓️ Mois", "📆 Année"])
+
+    # ---- Jour ----
+    with tab_day:
+        st.caption(f"Détail jour par jour pour {month}.")
+        by_day = activity.groupby(["date", "team_id_dn", "group_id_dn", "task_type_id_dn"],
+                                  as_index=False).agg(
+            agent_hours=("agent_hours", "sum"), cost=("cost", "sum"),
+            contacts_est=("contacts_est", "sum"))
+        c1, c2 = st.columns(2)
+        with c1:
+            byday_team = by_day.groupby(["date", "team_id_dn"], as_index=False)["agent_hours"].sum()
+            fig = px.bar(byday_team, x="date", y="agent_hours", color="team_id_dn",
+                        labels={"team_id_dn": "Équipe", "agent_hours": "Heures agent"},
+                        title="Heures agent par jour et par équipe")
+            fig.update_layout(height=350, legend_title="")
+            st.plotly_chart(fig, width="stretch")
+        with c2:
+            byday_task = by_day.groupby(["date", "task_type_id_dn"], as_index=False)["contacts_est"].sum()
+            fig2 = px.bar(byday_task, x="date", y="contacts_est", color="task_type_id_dn",
+                         labels={"task_type_id_dn": "Type de tâche", "contacts_est": "Contacts (estimé)"},
+                         title="Volume de contacts estimé par jour et par tâche")
+            fig2.update_layout(height=350, legend_title="")
+            st.plotly_chart(fig2, width="stretch")
+        st.dataframe(
+            by_day.rename(columns={"date": "Date", "team_id_dn": "Équipe", "group_id_dn": "Groupe",
+                                   "task_type_id_dn": "Type de tâche", "agent_hours": "Heures agent",
+                                   "cost": "Coût (€)", "contacts_est": "Contacts (estimé)"})
+            .sort_values(["Date", "Équipe"]),
+            width="stretch", hide_index=True)
+
+    # ---- Mois ----
+    with tab_month:
+        st.caption(f"Total du mois {month}, ventilé par équipe × groupe × tâche.")
+        by_month = activity.groupby(["team_id_dn", "group_id_dn", "task_type_id_dn"], as_index=False).agg(
+            agent_hours=("agent_hours", "sum"), cost=("cost", "sum"), contacts_est=("contacts_est", "sum"))
+        C.kpi_row([
+            ("Heures agent (total)", f"{by_month['agent_hours'].sum():,.0f} h"),
+            ("Coût total", C.eur(by_month["cost"].sum())),
+            ("Contacts traités (estimé)", f"{by_month['contacts_est'].sum():,.0f}"),
+        ])
+        c3, c4 = st.columns(2)
+        with c3:
+            m_team = by_month.groupby("team_id_dn", as_index=False)["agent_hours"].sum().sort_values("agent_hours")
+            fig3 = px.bar(m_team, x="agent_hours", y="team_id_dn", orientation="h",
+                         labels={"team_id_dn": "", "agent_hours": "Heures agent"},
+                         title="Heures agent du mois par équipe")
+            fig3.update_layout(height=max(250, 40 * len(m_team)))
+            st.plotly_chart(fig3, width="stretch")
+        with c4:
+            m_cost = by_month.groupby("team_id_dn", as_index=False)["cost"].sum().sort_values("cost")
+            fig4 = px.bar(m_cost, x="cost", y="team_id_dn", orientation="h",
+                         labels={"team_id_dn": "", "cost": "Coût (€)"},
+                         title="Coût du mois par équipe")
+            fig4.update_layout(height=max(250, 40 * len(m_cost)))
+            st.plotly_chart(fig4, width="stretch")
+        st.dataframe(
+            by_month.rename(columns={"team_id_dn": "Équipe", "group_id_dn": "Groupe",
+                                     "task_type_id_dn": "Type de tâche", "agent_hours": "Heures agent",
+                                     "cost": "Coût (€)", "contacts_est": "Contacts (estimé)"})
+            .sort_values("Heures agent", ascending=False),
+            width="stretch", hide_index=True)
+
+    # ---- Année ----
+    with tab_year:
+        year = month.split("-")[0]
+        st.caption(f"Cumul de l'année {year} (tous les mois forecastés disponibles), par équipe × mois.")
+        year_months = [m for m in C.months() if m.startswith(year)]
+        if len(year_months) > 1 and not st.checkbox(
+                f"Calculer les {len(year_months)} mois de {year} (peut être lent)", key="act_year_go"):
+            st.info("Cochez la case ci-dessus pour lancer le calcul sur l'année complète.")
+        else:
+            frames = []
+            for m in year_months:
+                cov_m = C.coverage(m, v)
+                if cov_m["supply_team"].empty:
+                    continue
+                hc = _activity_hours_cost(cov_m["supply_team"], BUSINESS_TZ)
+                if hc.empty:
+                    continue
+                hc["month"] = m
+                frames.append(hc)
+            if not frames:
+                st.info("Aucune allocation trouvée sur les mois de cette année.")
+            else:
+                year_df = pd.concat(frames, ignore_index=True)
+                year_df = _with_dn(year_df, "team_id")
+                by_year = year_df.groupby(["month", "team_id_dn"], as_index=False).agg(
+                    agent_hours=("agent_hours", "sum"), cost=("cost", "sum"))
+                fig5 = px.bar(by_year, x="month", y="agent_hours", color="team_id_dn",
+                             labels={"team_id_dn": "Équipe", "agent_hours": "Heures agent", "month": "Mois"},
+                             title=f"Heures agent par mois — {year}")
+                fig5.update_layout(height=380, legend_title="")
+                st.plotly_chart(fig5, width="stretch")
+                totals = by_year.groupby("team_id_dn", as_index=False).agg(
+                    agent_hours=("agent_hours", "sum"), cost=("cost", "sum"))
+                C.kpi_row([
+                    ("Heures agent (année)", f"{totals['agent_hours'].sum():,.0f} h"),
+                    ("Coût total (année)", C.eur(totals["cost"].sum())),
+                ])
+                st.dataframe(
+                    by_year.rename(columns={"month": "Mois", "team_id_dn": "Équipe",
+                                            "agent_hours": "Heures agent", "cost": "Coût (€)"}),
+                    width="stretch", hide_index=True)
 
 
 def render_explorer():
@@ -2434,8 +2654,9 @@ def render_teams_page():
         "et leur **affectation aux groupes commerciaux** (quels contacts elles traitent)."
     )
 
-    tab_teams, tab_avail, tab_tg = st.tabs(
-        ["🧑‍💼 Équipes (A6)", "🕐 Disponibilités (D1)", "🔗 Affectation groupes (A8)"]
+    tab_teams, tab_avail, tab_tg, tab_tt = st.tabs(
+        ["🧑‍💼 Équipes (A6)", "🕐 Disponibilités (D1)", "🔗 Affectation groupes (A8)",
+         "🎯 Affectation tâches (A9)"]
     )
 
     # ---- Tab Équipes ----
@@ -2659,6 +2880,72 @@ def render_teams_page():
                 ("🚀", "**Relancer l'optimiseur** — l'affectation groupes pilote quelles équipes couvrent quelle demande (page ⑥ Couverture)"),
                 ("⚠️", "Une équipe L1 sans groupe affecté ne sera jamais allouée par l'optimiseur"),
                 ("📐", "Les équipes L2 mutualisées doivent couvrir **tous** les groupes qu'elles escaladent"),
+            ])
+
+    # ---- Tab Affectation tâches ----
+    with tab_tt:
+        st.markdown(
+            "L'**affectation équipes → tâches** restreint une équipe à certains **types de tâche** "
+            "(compétences). Depuis la refonte de l'optimiseur, la couverture est calculée "
+            "**par tâche** (pas seulement par groupe) : une équipe ne peut être allouée qu'aux "
+            "tâches pour lesquelles elle est éligible."
+        )
+        st.info(
+            "💡 **Rétro-compatible** : une équipe **sans aucune ligne** ici est éligible à "
+            "**toutes** les tâches de ses groupes affectés (comportement par défaut, comme "
+            "avant cette fonctionnalité). Ajoutez des lignes uniquement pour les équipes "
+            "réellement **spécialisées** sur certaines tâches."
+        )
+        team_task_df = C.table("team_task")
+        task_ids_tt = C.table("task_type")["task_type_id"].tolist() if not C.table("task_type").empty else []
+        team_opts_tt, team_inv_tt = _editor_opts("team")
+        task_opts_tt, task_inv_tt = _editor_opts("task_type")
+
+        # Visual matrix (read-only) — équipes déjà restreintes uniquement
+        if not team_task_df.empty:
+            st.markdown("**Vue matricielle (équipes restreintes uniquement) :**")
+            t_lbls_tt = C.labels("team")
+            k_lbls_tt = C.labels("task_type")
+            matrix_tt = team_task_df.assign(v=1).pivot_table(
+                index="team_id", columns="task_type_id", values="v", fill_value=0, aggfunc="sum"
+            ).reset_index()
+            matrix_tt["Équipe"] = matrix_tt["team_id"].map(lambda x: f"{t_lbls_tt.get(x,x)} ({x})")
+            matrix_tt = matrix_tt.drop(columns=["team_id"])
+            matrix_tt = matrix_tt.rename(
+                columns={t: f"{k_lbls_tt.get(t,t)} ({t})" for t in task_ids_tt if t in matrix_tt.columns})
+            cols_ord_tt = ["Équipe"] + [c for c in matrix_tt.columns if c != "Équipe"]
+            st.dataframe(matrix_tt[cols_ord_tt], hide_index=True, use_container_width=True)
+            st.caption("1 = équipe éligible à cette tâche  ·  Une équipe absente de ce tableau "
+                      "est éligible à TOUTES les tâches de ses groupes.")
+            st.divider()
+
+        st.markdown("**Éditer (ajouter / supprimer des restrictions) :**")
+        df_tt_disp = team_task_df.copy()
+        if not df_tt_disp.empty:
+            df_tt_disp["team_id"] = df_tt_disp["team_id"].map(
+                lambda x: f"{C.labels('team').get(str(x),str(x))} ({x})")
+            df_tt_disp["task_type_id"] = df_tt_disp["task_type_id"].map(
+                lambda x: f"{C.labels('task_type').get(str(x),str(x))} ({x})")
+        edited_tt_disp = st.data_editor(
+            df_tt_disp, width="stretch", hide_index=True, num_rows="dynamic", key="ed_tt",
+            column_config={
+                "team_id":      st.column_config.SelectboxColumn("Équipe", options=team_opts_tt),
+                "task_type_id": st.column_config.SelectboxColumn("Type de tâche", options=task_opts_tt),
+            },
+        )
+        edited_tt = edited_tt_disp.copy()
+        if not edited_tt.empty:
+            edited_tt["team_id"] = _resolve(edited_tt["team_id"], team_inv_tt)
+            edited_tt["task_type_id"] = _resolve(edited_tt["task_type_id"], task_inv_tt)
+        if st.button("💾 Enregistrer l'affectation équipes→tâches", type="primary", key="save_tt"):
+            C.save_table("team_task", edited_tt)
+            st.success("Affectation tâches enregistrée.")
+            _cascade_info([
+                ("🚀", "**Relancer l'optimiseur** — l'éligibilité par tâche change les contraintes "
+                 "de couverture (page ⑥ Couverture)"),
+                ("⚠️", "Une équipe désormais restreinte qui était la SEULE éligible à une tâche "
+                 "d'un groupe rendra cette tâche non-couvrable — vérifiez les avertissements "
+                 "du solveur après relance"),
             ])
 
 

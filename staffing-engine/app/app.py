@@ -108,8 +108,9 @@ pages = {
         st.Page(P.render_coverage, title="⑥ Couverture & coûts", icon="🗓️"),
     ],
     "Analyse": [
-        st.Page(P.render_forecast,       title="Réel vs Forecast",  icon="🔍"),
-        st.Page(P.render_monthly_report, title="Rapport mensuel",   icon="📊"),
+        st.Page(P.render_forecast,          title="Réel vs Forecast",     icon="🔍"),
+        st.Page(P.render_monthly_report,    title="Rapport mensuel",      icon="📊"),
+        st.Page(P.render_activity_reports,  title="⑦ Rapports d'activité", icon="📈"),
     ],
     "Référentiels": [
         st.Page(P.render_ref_regions, title="Régions & Transports",  icon="🌍"),

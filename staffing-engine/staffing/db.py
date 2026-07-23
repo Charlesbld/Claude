@@ -91,6 +91,12 @@ TABLES: dict[str, TableSpec] = {
                      ["team_id", "group_id"], [], editable=True, group="Offre",
                      note="Chaque équipe se spécialise sur un ou plusieurs groupes commerciaux. "
                           "Une ligne = l'équipe peut traiter les contacts de ce groupe."),
+    "team_task": _t("team_task", "Affectation équipes → types de tâche (A9)", ["team_id", "task_type_id"],
+                    ["team_id", "task_type_id"], [], editable=True, group="Offre",
+                    note="Compétences par tâche : une ligne = l'équipe peut traiter ce type de tâche. "
+                         "Une équipe SANS ligne ici est considérée éligible à TOUTES les tâches de ses "
+                         "groupes (comportement rétro-compatible). Dès qu'une ligne existe pour une équipe, "
+                         "elle est restreinte aux tâches listées."),
     "profile_dow": _t("profile_dow", "Profil jour de semaine (mensuel→jour)", ["dow"],
                       ["dow"], ["weight"], editable=True, group="Profils",
                       note="Poids relatif des contacts par jour de semaine (remplace départ×lag)."),
@@ -98,9 +104,10 @@ TABLES: dict[str, TableSpec] = {
                            ["dow", "slot_local"], ["weight"], editable=True, group="Profils",
                            note="Répartition des contacts sur les 96 créneaux locaux, par jour de semaine."),
     "allocation": _t("allocation", "Répartition d'agents (optimiseur, éditable)",
-                     ["dow", "slot_utc", "team_id"],
-                     ["dow", "slot_utc", "team_id"], ["agents"], editable=True, group="Offre",
-                     note="Nb d'agents par équipe × créneau UTC × jour de semaine. Rempli par l'optimiseur, ajustable à la main."),
+                     ["dow", "slot_utc", "team_id", "task_type_id"],
+                     ["dow", "slot_utc", "team_id", "task_type_id"], ["agents"], editable=True, group="Offre",
+                     note="Nb d'agents par équipe × créneau UTC × jour de semaine × type de tâche. "
+                          "Rempli par l'optimiseur, ajustable à la main."),
 }
 
 EDITABLE = [n for n, s in TABLES.items() if s.editable]
@@ -177,11 +184,12 @@ FK_DEPS: dict[str, list[tuple[str, str]]] = {
                   ("contact_rate_forecast", "supply_id"), ("tasks_real", "supply_id"),
                   ("group_map", "supply_id")],
     "task_type": [("contact_rate_forecast", "task_type_id"), ("tasks_real", "task_type_id"),
-                  ("param_aht", "task_type_id")],
+                  ("param_aht", "task_type_id"), ("team_task", "task_type_id"),
+                  ("allocation", "task_type_id")],
     "group":     [("group_map", "group_id"), ("team_group", "group_id"),
                   ("param_aht", "group_id")],
     "team":      [("team_availability", "team_id"), ("team_group", "team_id"),
-                  ("allocation", "team_id")],
+                  ("team_task", "team_id"), ("allocation", "team_id")],
 }
 
 

@@ -18,7 +18,7 @@ MASTER_DIR = ROOT / "data" / "master"
 
 # Tables dont l'état doit survivre à un redéploiement : seed_db.py les relit depuis MASTER_DIR.
 _MASTER_TABLES = {"region", "supply", "task_type", "group", "team",
-                  "team_availability", "team_group", "service_params", "param_aht"}
+                  "team_availability", "team_group", "team_task", "service_params", "param_aht"}
 
 
 # --- amorçage ----------------------------------------------------------------

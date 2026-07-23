@@ -530,3 +530,47 @@ def test_cascade_rename_key(tmp_path):
             'SELECT COUNT(*) FROM "region" WHERE "region_id" = "FR"'
         ).fetchone()[0]
     assert rows_fr > 0, "cascade_rename_key ne doit pas toucher la table primaire"
+
+
+# --- Optimiseur par tâche (team_task eligibility) -----------------------------
+def test_task_eligibility_restricts_allocation(tmp_path_factory):
+    """Une équipe restreinte via team_task ne doit jamais être allouée à une tâche
+    hors de sa liste d'éligibilité, et sa capacité physique doit être partagée
+    (pas dupliquée) entre les tâches qu'elle traite dans un même créneau."""
+    dbp = tmp_path_factory.mktemp("data") / "task_elig_test.db"
+    seed_db.main(dbp)
+
+    teams = db.read_table("team", dbp)
+    task_types = db.read_table("task_type", dbp)
+    l1_tasks = task_types[task_types["level"] == 1]["task_type_id"].tolist()
+    if len(l1_tasks) < 2:
+        pytest.skip("besoin d'au moins 2 tâches L1 dans le seed")
+    l1_team = teams[teams["level"] == 1]["team_id"].iloc[0]
+    restricted_task = l1_tasks[0]
+    excluded_task = l1_tasks[1]
+
+    # Restreindre l1_team à restricted_task uniquement
+    team_task = pd.DataFrame([{"team_id": l1_team, "task_type_id": restricted_task}])
+    db.write_table("team_task", team_task, dbp)
+
+    alloc = optimizer.optimize_allocation("2026-07", dbp, time_limit=20, write=False)
+    if alloc.empty:
+        pytest.skip("allocation vide — vérifier les disponibilités")
+
+    # L'équipe restreinte ne doit JAMAIS apparaître allouée à la tâche exclue
+    bad_rows = alloc[(alloc["team_id"] == l1_team) & (alloc["task_type_id"] == excluded_task)]
+    assert bad_rows.empty, (
+        f"{l1_team} alloué à {excluded_task} alors qu'il est restreint à {restricted_task}"
+    )
+
+    # Capacité physique partagée entre tâches : pour ce team, à chaque (dow,slot),
+    # la somme des agents toutes tâches confondues ne doit pas dépasser max_agents.
+    cap_row = teams[teams["team_id"] == l1_team]
+    cap_val = cap_row["max_agents"].iloc[0] if not cap_row.empty and pd.notna(cap_row["max_agents"].iloc[0]) else None
+    if cap_val is not None:
+        team_alloc = alloc[alloc["team_id"] == l1_team]
+        totals = team_alloc.groupby(["dow", "slot_utc"])["agents"].sum()
+        assert (totals <= int(cap_val) + 1e-6).all(), (
+            f"{l1_team}: capacité dépassée toutes tâches confondues — "
+            f"max={totals.max()} > cap={cap_val}"
+        )

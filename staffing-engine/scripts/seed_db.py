@@ -205,6 +205,9 @@ def main(db_path=None) -> None:
     profile_dow = pd.DataFrame({"dow": range(7), "weight": [0.85, 0.80, 0.85, 0.95, 1.30, 1.45, 1.15]})
 
     team_group = _load_master("team_group", pd.DataFrame(TEAM_GROUP, columns=["team_id", "group_id"]))
+    # Vide par défaut : une équipe sans ligne ici est éligible à TOUTES les tâches de ses groupes
+    # (rétro-compatible). Ajoutez des lignes pour restreindre une équipe à certaines tâches.
+    team_task = _load_master("team_task", pd.DataFrame(columns=["team_id", "task_type_id"]))
 
     db.seed({
         "region": region, "supply": supply, "task_type": task_type,
@@ -214,9 +217,10 @@ def main(db_path=None) -> None:
         "service_params": _load_master("service_params", pd.DataFrame(SERVICE_PARAMS)), "team": team,
         "team_availability": team_availability,
         "team_group": team_group,
+        "team_task": team_task,
         "profile_dow": profile_dow,
         "profile_intraday": _intraday(),
-        "allocation": pd.DataFrame(columns=["dow", "slot_utc", "team_id", "agents"]),
+        "allocation": pd.DataFrame(columns=["dow", "slot_utc", "team_id", "task_type_id", "agents"]),
     }, db_path)
     print(f"[OK] Base SQLite amorcée : {db_path}")
     for name in db.list_tables(db_path):

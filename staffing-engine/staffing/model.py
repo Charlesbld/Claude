@@ -237,6 +237,92 @@ def required_by_group(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True).drop(columns="workload_seconds")
 
 
+def required_by_task(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
+    """ETP requis par (bucket_utc × level × group_id × task_type_id) — Erlang C par tâche.
+
+    File d'attente séparée par type de tâche (pas de mutualisation inter-tâche) : nécessaire
+    dès qu'une équipe n'est éligible qu'à certaines tâches (voir table team_task). Les
+    paramètres SLA restent ceux du (level, group_id) — la cible de service ne varie pas
+    par tâche, seul le calcul de la charge est isolé par tâche.
+    """
+    sp = db.read_table("service_params", db_path)
+    sp_indexed = sp.set_index("level") if "group_id" not in sp.columns else None
+    pooled = demand.groupby(["bucket_utc", "level", "group_id", "task_type_id"], as_index=False).agg(
+        contacts=("contacts", "sum"),
+        workload_hours=("workload_hours", "sum"),
+        workload_seconds=("workload_hours", lambda s: s.sum() * 3600.0),
+    )
+    pooled["aht_eff"] = np.where(pooled["contacts"] > 0,
+                                 pooled["workload_seconds"] / pooled["contacts"], 0.0)
+    frames = []
+    for (level, group_id, task_type_id), sub in pooled.groupby(["level", "group_id", "task_type_id"]):
+        if sp_indexed is not None:
+            if level not in sp_indexed.index:
+                continue
+            p = sp_indexed.loc[level]
+        else:
+            p = _get_service_params(sp, level, group_id)
+            if p is None:
+                continue
+        sub = sub.copy()
+        sub["agents_online"] = erlang.required_agents_series(
+            sub["contacts"], sub["aht_eff"], float(p["sl_target"]), float(p["sl_seconds"]),
+            float(p["max_occupancy"]), INTERVAL_SECONDS)
+        sub["required_fte"] = sub["agents_online"] / (1.0 - float(p["shrinkage"]))
+        sub["shrinkage"] = float(p["shrinkage"])
+        frames.append(sub)
+    if not frames:
+        return pd.DataFrame(columns=["bucket_utc", "level", "group_id", "task_type_id", "contacts",
+                                     "workload_hours", "aht_eff", "agents_online",
+                                     "required_fte", "shrinkage"])
+    return pd.concat(frames, ignore_index=True).drop(columns="workload_seconds")
+
+
+def team_is_eligible(team_id: str, task_type_id: str, team_task: pd.DataFrame) -> bool:
+    """Une équipe est éligible à une tâche si elle n'a AUCUNE ligne dans team_task (non
+    restreinte, rétro-compatible), ou si (team_id, task_type_id) y figure explicitement."""
+    if team_task.empty or team_id not in set(team_task["team_id"]):
+        return True
+    return task_type_id in set(team_task[team_task["team_id"] == team_id]["task_type_id"])
+
+
+def required_by_level_task(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
+    """ETP requis par (bucket_utc × level × task_type_id) — Erlang C poolé multi-groupe, par tâche.
+
+    Utilisé pour les levels mutualisés (ex. L2) : la capacité se pool entre tous les groupes
+    (comme required_by_level), mais reste séparée par type de tâche — nécessaire dès qu'une
+    équipe n'est éligible qu'à certaines tâches (team_task).
+    """
+    sp_raw = db.read_table("service_params", db_path)
+    if "group_id" in sp_raw.columns:
+        sp_raw = sp_raw[sp_raw["group_id"].isna()].drop(columns=["group_id"])
+    sp = sp_raw.set_index("level")
+    pooled = demand.groupby(["bucket_utc", "level", "task_type_id"], as_index=False).agg(
+        contacts=("contacts", "sum"),
+        workload_hours=("workload_hours", "sum"),
+        workload_seconds=("workload_hours", lambda s: s.sum() * 3600.0),
+    )
+    pooled["aht_eff"] = np.where(pooled["contacts"] > 0,
+                                 pooled["workload_seconds"] / pooled["contacts"], 0.0)
+    frames = []
+    for (level, task_type_id), sub in pooled.groupby(["level", "task_type_id"]):
+        if level not in sp.index:
+            continue
+        p = sp.loc[level]
+        sub = sub.copy()
+        sub["agents_online"] = erlang.required_agents_series(
+            sub["contacts"], sub["aht_eff"], float(p["sl_target"]), float(p["sl_seconds"]),
+            float(p["max_occupancy"]), INTERVAL_SECONDS)
+        sub["required_fte"] = sub["agents_online"] / (1.0 - float(p["shrinkage"]))
+        sub["shrinkage"] = float(p["shrinkage"])
+        frames.append(sub)
+    if not frames:
+        return pd.DataFrame(columns=["bucket_utc", "level", "task_type_id", "contacts",
+                                     "workload_hours", "aht_eff", "agents_online",
+                                     "required_fte", "shrinkage"])
+    return pd.concat(frames, ignore_index=True).drop(columns="workload_seconds")
+
+
 def required_by_level(demand: pd.DataFrame, db_path=db.DB_PATH) -> pd.DataFrame:
     """Backward-compat alias: pools required_by_group across groups for tests."""
     by_group = required_by_group(demand, db_path)

@@ -1,3 +1,4 @@
 # Claude Code internal working directories
 .claude/*
 !.claude/skills/
+!.claude/agents/
